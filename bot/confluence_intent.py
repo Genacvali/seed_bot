@@ -21,13 +21,17 @@ if TYPE_CHECKING:
 # ------------------------------------------------------------------
 
 # Confluence URL: /display/SPACE/Title или ?pageId=... или /wiki/spaces/...
+# Исключаем Markdown-символы []() из URL-захвата
 _CONFLUENCE_URL_RE = re.compile(
-    r"https?://[^\s\"'<>]+/"
-    r"(?:display/[A-Z][^/\s]+/[^\s\"'<>?#]+|"
+    r"https?://[^\s\"'<>\[\]()]+/"
+    r"(?:display/[A-Z][^/\s\[\]()]+/[^\s\"'<>\[\]()#?]+|"
     r"pages/viewpage\.action\?pageId=\d+|"
-    r"wiki/spaces/[^/\s]+/pages/\d+)",
+    r"wiki/spaces/[^\s\[\]()/]+/pages/\d+)",
     re.IGNORECASE,
 )
+
+# Markdown-ссылка: [текст](url) или [url](url)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
 
 # Запросы о доступных документациях
 _DOCS_LIST_RE = re.compile(
@@ -95,7 +99,34 @@ def detect(message: str) -> ConfluenceIntent:
 
 
 def find_confluence_urls(text: str) -> list[str]:
-    return _CONFLUENCE_URL_RE.findall(text)
+    """
+    Извлекает Confluence URL из текста.
+    Поддерживает:
+      - Чистые URL: https://confluence.example.com/display/SPACE/Title
+      - Markdown-ссылки: [текст](url) или [url](url)
+      - Mattermost auto-link: <url>
+    """
+    urls: list[str] = []
+
+    # 1. Markdown [text](url) — берём url из скобок
+    for m in _MARKDOWN_LINK_RE.finditer(text):
+        url = m.group(2).strip()
+        if _CONFLUENCE_URL_RE.search(url) or _is_confluence_url(url):
+            urls.append(url)
+
+    # 2. Чистые URL (не в Markdown)
+    # Убираем Markdown-ссылки перед поиском чтобы не задваивать
+    text_no_md = _MARKDOWN_LINK_RE.sub(" ", text)
+    for url in _CONFLUENCE_URL_RE.findall(text_no_md):
+        if url not in urls:
+            urls.append(url)
+
+    return urls
+
+
+def _is_confluence_url(url: str) -> bool:
+    """Проверяет что URL выглядит как Confluence-страница (без строгого regex)."""
+    return bool(re.search(r"/display/|/wiki/spaces/|pageId=", url, re.IGNORECASE))
 
 
 def extract_hostnames(text: str) -> list[str]:
