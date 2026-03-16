@@ -33,19 +33,26 @@ HELP_TEXT = """\
 |---------|-----------|
 | `@seed help` | Это сообщение |
 | `@seed server <маска>` | Поиск сервера в Confluence (`*`, `?`, `r:regex`) |
-| `@seed confluence add <url>` | Добавить страницу Confluence для поиска серверов |
-| `@seed confluence list` | Список подключённых страниц Confluence |
+| `@seed confluence add <url>` | Добавить страницу Confluence |
+| `@seed confluence list` | Список страниц Confluence |
 | `@seed confluence remove <url/id>` | Отключить страницу Confluence |
-| `@seed find <запрос>` | Поиск по базе знаний |
+| `@seed find <запрос>` | Поиск по базе знаний и Confluence |
+| `@seed кто такой <имя/@ник>` | Найти человека в базе знаний |
+| `@seed люди` | Все известные люди команды |
+| `@seed глоссарий` | Словарь аббревиатур команды |
+| `@seed пробелы` | Что бот не смог ответить (топ вопросов) |
 | `@seed tl;dr` | Резюме текущего треда |
 | `@seed oncall` | Кто сейчас дежурит |
 | `@seed stats` | Топ-10 алертов за всё время |
 | `@seed save` | Сохранить тред как known issue |
 
 **Автоматически** (без команды):
-- Любой **алерт** → анализ + первые шаги диагностики
-- Любой **факт** ("серверы с X — это Y, отвечает @vasya") → запоминает
-- В **треде** — отвечает без @упоминания, помнит историю разговора
+- **Алерт** → анализ + первые шаги диагностики
+- **Факт** ("@vasya отвечает за MongoDB") → запоминает, пишет в базу
+- **Аббревиатура** ("smi = SmartApp IDE") → добавляет в словарь
+- **Ссылка Confluence** → молча индексирует, ставит 📎
+- **"не так" / "неправильно"** → принимает поправку, обновляет факт
+- **Негатив/фрустрация** → переспрашивает что пошло не так
 """
 
 _CMD_RE = re.compile(
@@ -92,6 +99,36 @@ def handle(
     # stats
     if p in ("stats", "статистика", "алерты"):
         return _cmd_stats(storage)
+
+    # люди — список всех известных людей
+    if p in ("люди", "команда", "people", "team", "кто есть"):
+        return _cmd_people_list(storage)
+
+    # глоссарий — словарь аббревиатур
+    if p in ("глоссарий", "словарь", "glossary", "термины", "аббревиатуры"):
+        return _cmd_glossary(storage)
+
+    # пробелы — что бот не смог ответить
+    if p in ("пробелы", "gaps", "что я не знаю", "незнаю", "knowledge gaps", "пробел"):
+        return _cmd_gaps(storage)
+
+    # кто такой / who is — поиск человека
+    _WHO_RE = re.compile(
+        r"^(?:кто\s+такой\s+|кто\s+такая\s+|кто\s+это\s+|who\s+is\s+|who\s+are\s+|расскажи\s+про\s+)(.+)",
+        re.IGNORECASE,
+    )
+    m_who = _WHO_RE.match(clean_prompt.strip())
+    if m_who:
+        return _cmd_who(m_who.group(1).strip(), storage, gc)
+
+    # знаешь ... ? — тоже поиск человека/термина
+    _KNOW_PERSON_RE = re.compile(
+        r"^(?:ты\s+знаешь|знаешь|знаком)\s+(?:кто\s+такой\s+|кто\s+это\s+)?@?([\w\s._-]{2,50})\??",
+        re.IGNORECASE,
+    )
+    m_know = _KNOW_PERSON_RE.match(clean_prompt.strip())
+    if m_know:
+        return _cmd_who(m_know.group(1).strip(), storage, gc)
 
     # find / найди — роутим в Confluence если запрос похож на сервер или явно упоминает доки
     m = _CMD_RE.search(clean_prompt)
@@ -564,4 +601,132 @@ def _cmd_server(
     if exact:
         lines.append(f"\n---\n**Точное совпадение:**\n{exact[0].to_markdown()}")
 
+    return CommandResult("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# People / Glossary / Gaps / Who
+# ---------------------------------------------------------------------------
+
+def _cmd_people_list(storage: "Storage | None") -> CommandResult:
+    """Список всех известных людей команды (feature 1, 5, 7)."""
+    if not storage:
+        return CommandResult("MongoDB не подключён — база людей недоступна.")
+    try:
+        people = storage.list_people()
+    except Exception as e:
+        return CommandResult(f"Ошибка при получении списка: {e}")
+
+    if not people:
+        return CommandResult(
+            "Пока никого не знаю из команды.\n"
+            "Расскажи: `@Иванов отвечает за MongoDB кластеры` — запомню."
+        )
+
+    lines = [f"**Знаю {len(people)} человек(а) из команды:**\n"]
+    for p in people[:30]:
+        name = p.get("display_name") or p.get("username", "?")
+        line = f"- **{name}**"
+        if p.get("username") and p["username"] != name.lower():
+            line += f" (`@{p['username']}`)"
+        if p.get("role"):
+            line += f" — {p['role']}"
+        if p.get("expertise"):
+            line += f" | {', '.join(p['expertise'][:3])}"
+        lines.append(line)
+    if len(people) > 30:
+        lines.append(f"\n_…и ещё {len(people) - 30}_")
+    return CommandResult("\n".join(lines))
+
+
+def _cmd_who(query: str, storage: "Storage | None", gc: "GigaChatClient") -> CommandResult:
+    """Поиск человека по имени/нику (features 1, 7)."""
+    query_clean = query.strip().lstrip("@")
+    results: list[dict[str, Any]] = []
+
+    if storage:
+        try:
+            results = storage.find_person(query_clean)
+        except Exception:
+            pass
+        # Если не нашли в people — ищем в фактах
+        if not results:
+            try:
+                facts = storage.search_facts(query_clean, limit=3)
+                if facts:
+                    lines = [f"Не нашёл в базе людей, но есть в фактах:\n"]
+                    for f in facts:
+                        lines.append(f"- {f.get('summary', '')}")
+                    return CommandResult("\n".join(lines))
+            except Exception:
+                pass
+
+    if not results:
+        return CommandResult(
+            f"Не знаю кто такой `{query_clean}`.\n"
+            f"Расскажи мне: `@{query_clean} — тимлид DBA, отвечает за MongoDB` — запомню."
+        )
+
+    lines = []
+    for p in results[:3]:
+        name = p.get("display_name") or p.get("username", "?")
+        lines.append(f"**{name}**")
+        if p.get("username"):
+            lines.append(f"- Ник: `@{p['username']}`")
+        if p.get("role"):
+            lines.append(f"- Роль: {p['role']}")
+        if p.get("expertise"):
+            lines.append(f"- Экспертиза: {', '.join(p['expertise'])}")
+        lines.append("")
+
+    return CommandResult("\n".join(lines).strip())
+
+
+def _cmd_glossary(storage: "Storage | None") -> CommandResult:
+    """Словарь аббревиатур команды (feature 4)."""
+    if not storage:
+        return CommandResult("MongoDB не подключён — словарь недоступен.")
+    try:
+        terms = storage.list_terms()
+    except Exception as e:
+        return CommandResult(f"Ошибка: {e}")
+
+    if not terms:
+        return CommandResult(
+            "Словарь пуст.\n"
+            "Учу аббревиатуры автоматически: напиши `smi = SmartApp IDE` — запомню."
+        )
+
+    lines = [f"**Словарь команды ({len(terms)} терминов):**\n"]
+    for t in terms[:50]:
+        line = f"- `{t['term']}` = **{t['expansion']}**"
+        if t.get("context"):
+            line += f"  _{t['context'][:60]}_"
+        lines.append(line)
+    if len(terms) > 50:
+        lines.append(f"\n_…и ещё {len(terms) - 50}_")
+    return CommandResult("\n".join(lines))
+
+
+def _cmd_gaps(storage: "Storage | None") -> CommandResult:
+    """Топ пробелов в знаниях (feature 13)."""
+    if not storage:
+        return CommandResult("MongoDB не подключён.")
+    try:
+        gaps = storage.get_gaps(resolved=False, limit=10)
+    except Exception as e:
+        return CommandResult(f"Ошибка: {e}")
+
+    if not gaps:
+        return CommandResult("Пробелов нет — на все вопросы нашёл ответы!")
+
+    lines = [f"**Топ-{len(gaps)} вопросов, на которые я не смог ответить:**\n"]
+    for i, g in enumerate(gaps, 1):
+        q = g.get("question", "?")[:100]
+        times = g.get("times", 1)
+        lines.append(f"{i}. «{q}» _(спрашивали {times}x)_")
+
+    lines.append(
+        "\nЕсли знаешь ответ — просто напиши мне факт, запомню."
+    )
     return CommandResult("\n".join(lines))

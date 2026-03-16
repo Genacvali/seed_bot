@@ -31,14 +31,20 @@ from .webhook_server import start_webhook_server
 
 _MENTION_RE = re.compile(r"@\w+")
 
-# Кеш: thread_id → (list[ServerRecord], timestamp)
-# Хранит последние найденные серверы в треде для поддержки follow-up вопросов
-_THREAD_SERVER_CTX: dict[str, tuple[list, float]] = {}
 _CTX_TTL = 3600.0  # 1 час
+
+# Кеш: thread_id → (list[ServerRecord], timestamp)
+_THREAD_SERVER_CTX: dict[str, tuple[list, float]] = {}
+
+# Расширенный кеш треда: thread_id → {servers, people, topics, timestamp}  (feature 9)
+_THREAD_CTX: dict[str, dict] = {}
 
 
 def _cache_thread_records(thread_id: str, records: list) -> None:
     _THREAD_SERVER_CTX[thread_id] = (records, time.monotonic())
+    ctx = _THREAD_CTX.setdefault(thread_id, {})
+    ctx["servers"] = [r.short_name() for r in records if hasattr(r, "short_name")]
+    ctx["ts"] = time.monotonic()
 
 
 def _get_thread_records(thread_id: str) -> list:
@@ -48,8 +54,76 @@ def _get_thread_records(thread_id: str) -> list:
     return []
 
 
+def _update_thread_ctx(thread_id: str, **kwargs: object) -> None:
+    """Добавляет людей, сервисы, темы в контекст треда (feature 9)."""
+    ctx = _THREAD_CTX.setdefault(thread_id, {})
+    ctx["ts"] = time.monotonic()
+    for key, val in kwargs.items():
+        if isinstance(val, list):
+            existing = ctx.get(key, [])
+            ctx[key] = list(dict.fromkeys(existing + val))  # deduplicate, preserve order
+        else:
+            ctx[key] = val
+
+
+def _get_thread_ctx(thread_id: str) -> dict:
+    ctx = _THREAD_CTX.get(thread_id, {})
+    if ctx and time.monotonic() - ctx.get("ts", 0) < _CTX_TTL:
+        return ctx
+    return {}
+
+
 def _strip_mentions(text: str) -> str:
     return _MENTION_RE.sub("", unescape(text or "")).strip()
+
+
+# feature 10: молчаливое индексирование Confluence URL в любом сообщении треда
+def _make_silent_indexer(
+    confluence: object,
+    storage: object,
+    mm: object,
+    ev: object,
+    root_id: str,
+) -> None:
+    """Импортируется и вызывается только если нужно — избегаем циклических импортов."""
+    from .confluence_intent import find_confluence_urls
+
+    try:
+        urls = find_confluence_urls(getattr(ev, "message", ""))
+    except Exception:
+        return
+    if not urls:
+        return
+
+    from .confluence_client import ConfluenceClient
+    from .storage import Storage
+
+    for url in urls:
+        try:
+            info = confluence.resolve_page_url(url)  # type: ignore[union-attr]
+            page_id = info["page_id"]
+            is_new = True
+            if isinstance(storage, Storage):
+                is_new = storage.add_confluence_page(
+                    page_id=page_id,
+                    title=info["title"],
+                    space_key=info["space_key"],
+                    url=url,
+                    added_by=getattr(ev, "user_id", ""),
+                )
+            else:
+                pages = getattr(confluence, "_cfg_pages", [])
+                if page_id not in pages:
+                    pages.append(page_id)
+                    confluence._cfg_pages = pages  # type: ignore[attr-defined]
+                else:
+                    is_new = False
+
+            if is_new:
+                print(f"[confluence] silent-indexed {info['title']!r} ({page_id})", flush=True)
+                mm.add_reaction(getattr(ev, "post_id", ""), "paperclip")  # type: ignore[union-attr]
+        except Exception as e:
+            print(f"[confluence] silent-index error: {e}", flush=True)
 
 
 def main() -> None:
@@ -174,6 +248,12 @@ def main() -> None:
         thread_id = ev.root_id or ev.post_id
         root_id = ev.root_id or ev.post_id
 
+        # feature 10: молчаливое индексирование Confluence в любом сообщении треда
+        if in_thread and confluence and "confluence" in raw.lower():
+            from .confluence_intent import find_confluence_urls
+            if find_confluence_urls(raw):
+                _make_silent_indexer(confluence, storage, mm, ev, root_id)
+
         # Фильтр: отвечаем только при @упоминании (если не в треде / reply_all)
         if not cfg.reply_all and not in_thread:
             if cfg.mention_required and "@" not in raw:
@@ -187,6 +267,21 @@ def main() -> None:
             storage.inc_usage(ev.user_id)
 
         def process() -> None:
+            # ── feature 6: Фрустрация — переспрашиваем ────────────────
+            if km.is_frustrated(prompt):
+                mm.create_post(
+                    ev.channel_id,
+                    "Сорри, что-то пошло не так. Что именно не устроило — уточни, попробую ещё раз.",
+                    root_id=root_id,
+                )
+                return
+
+            # ── feature 3: Коррекция в треде ──────────────────────────
+            if in_thread and km.is_correction(prompt):
+                reply = km._handle_correction(prompt, ev.user_id, in_thread=True)
+                mm.create_post(ev.channel_id, reply, root_id=root_id)
+                return
+
             # ── 1. Команды (@seed help, find, tl;dr…) ─────────────────
             cmd_result = handle_command(
                 raw_message=raw,
@@ -378,8 +473,14 @@ def main() -> None:
                     )
                     return
 
-            # ── 4. Классификация LLM: факт / алерт / вопрос ────────────
-            km_response = km.process(prompt, ev.user_id)
+            # ── 4. Классификация LLM: факт / алерт / вопрос / коррекция ──
+            km_response = km.process(
+                prompt,
+                ev.user_id,
+                channel_id=ev.channel_id,
+                thread_id=thread_id,
+                in_thread=in_thread,
+            )
 
             if km_response is not None:
                 mm.add_reaction(ev.post_id, "white_check_mark")
@@ -393,16 +494,58 @@ def main() -> None:
                         storage.inc_alert(atype, server)
                     if corr.note:
                         mm.create_post(ev.channel_id, corr.note, root_id=root_id)
+
+                # feature 9: обновляем контекст треда из фактов
+                entities = {}
+                if km._last_msg_type == "fact":
+                    last_fact = km._mem_facts[-1] if km._mem_facts else {}
+                    entities = last_fact.get("entities", {})
+                    _update_thread_ctx(
+                        thread_id,
+                        people=entities.get("people", []) + entities.get("users", []),
+                        topics=entities.get("tags", []) + entities.get("services", []),
+                    )
                 return
 
             # ── 5. Обычный чат с контекстом из базы знаний ────────────
-            extra_context = ""
+            extra_context_parts: list[str] = []
+
+            # Факты и глоссарий (feature 2, 4, 9)
             try:
-                extra_context = km.build_context_prompt(prompt)
+                kc = km.build_context_prompt(prompt)
+                if kc:
+                    extra_context_parts.append(kc)
             except Exception as e:
                 print(f"[knowledge] context error: {e}", flush=True)
 
+            # Люди (feature 7, 9)
+            try:
+                pc = km.build_people_context(prompt)
+                if pc:
+                    extra_context_parts.append(pc)
+            except Exception:
+                pass
+
+            # Расширенный контекст треда (feature 9)
+            tctx = _get_thread_ctx(thread_id)
+            if tctx:
+                ctx_lines: list[str] = []
+                if tctx.get("servers"):
+                    ctx_lines.append(f"Серверы обсуждавшиеся в треде: {', '.join(tctx['servers'][:5])}")
+                if tctx.get("people"):
+                    ctx_lines.append(f"Люди упоминавшиеся в треде: {', '.join(tctx['people'][:5])}")
+                if tctx.get("topics"):
+                    ctx_lines.append(f"Темы треда: {', '.join(tctx['topics'][:5])}")
+                if ctx_lines:
+                    extra_context_parts.append("### Контекст текущего треда:\n" + "\n".join(ctx_lines))
+
+            extra_context = "\n\n".join(extra_context_parts)
+
             post_streaming(ev.channel_id, root_id, prompt, thread_id, ev.user_id, extra_context)
+
+            # feature 13: если это был вопрос и бот ответил — помечаем gap решённым
+            if km._last_msg_type in ("question", "chat"):
+                km.resolve_gap_if_answered(prompt)
 
         priority = queue_mgr.PRIORITY_CHAT
         queue_mgr.submit(process, priority=priority)
@@ -429,11 +572,12 @@ def main() -> None:
 
         start_webhook_server(cfg.webhook_port, on_webhook_alert, secret=cfg.webhook_secret)
 
-    # ── Daily digest ──────────────────────────────────────────────────
+    # ── Daily + Weekly digest & Active learning ───────────────────────
     if cfg.digest_channel_id and storage:
         scheduler = Scheduler()
 
         def send_digest() -> None:
+            """Ежедневный дайджест (feature 14)."""
             today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
             try:
                 data = storage.get_daily_digest(today)
@@ -455,7 +599,58 @@ def main() -> None:
 
             mm.create_post(cfg.digest_channel_id, "\n".join(lines))  # type: ignore[arg-type]
 
+        def send_weekly_learning_digest() -> None:
+            """Еженедельный дайджест обучения (feature 14)."""
+            if not target_channel_id and not cfg.digest_channel_id:
+                return
+            ch = cfg.digest_channel_id or target_channel_id
+            try:
+                data = storage.get_weekly_learning_digest()
+            except Exception as e:
+                print(f"[digest] weekly error: {e}", flush=True)
+                return
+
+            lines = [
+                "### 🧠 Еженедельный дайджест обучения SEED",
+                "",
+                f"- Новых фактов: **{data['new_facts']}**",
+                f"- Новых людей в базе: **{data['new_people']}**",
+                f"- Новых терминов в словаре: **{data['new_terms']}**",
+            ]
+            if data["top_teachers"]:
+                lines.append("\n**Кто больше всего учил меня:**")
+                for t in data["top_teachers"]:
+                    lines.append(f"- `{t['_id']}` — {t['count']} фактов")
+
+            if data["top_gaps"]:
+                lines.append("\n**Вопросы, на которые я не смог ответить:**")
+                for g in data["top_gaps"]:
+                    lines.append(f"- «{g.get('question', '?')[:80]}» _{g.get('times', 1)}x_")
+
+            mm.create_post(ch, "\n".join(lines))  # type: ignore[arg-type]
+
+        def ask_about_gaps() -> None:
+            """Активное обучение: бот спрашивает про пробелы (feature 15)."""
+            if not target_channel_id:
+                return
+            try:
+                gaps = storage.get_gaps(resolved=False, limit=3)
+            except Exception:
+                return
+            if not gaps:
+                return
+
+            lines = ["Привет! Я заметил несколько вопросов, на которые не смог ответить — может, кто-то знает?\n"]
+            for g in gaps:
+                lines.append(f"- «{g.get('question', '?')[:100]}»")
+            lines.append("\nПросто напишите мне факт в ответ — запомню.")
+            mm.create_post(target_channel_id, "\n".join(lines))
+
         scheduler.add_daily(cfg.digest_time, send_digest)
+        # Еженедельный дайджест — понедельник 09:00 UTC
+        scheduler.add_weekly("09:00", 0, send_weekly_learning_digest)
+        # Активное обучение — среда 10:00 UTC
+        scheduler.add_weekly("10:00", 2, ask_about_gaps)
         scheduler.start()
         print(f"[scheduler] daily digest at {cfg.digest_time} UTC → channel {cfg.digest_channel_id}", flush=True)
 

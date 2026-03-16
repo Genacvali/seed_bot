@@ -2,15 +2,18 @@
 Модуль извлечения и применения знаний.
 
 Классификация входящего сообщения:
-  alert    — алерт мониторинга → анализ + рекомендации + инфо из базы знаний
-  fact     → структурировать и сохранить
-  question → обычный чат с контекстом из базы знаний
-  chat     → обычный чат без поиска
+  alert      — алерт мониторинга → анализ + рекомендации
+  fact       → структурировать и сохранить
+  question   → обычный чат с контекстом из базы знаний
+  chat       → обычный чат без поиска
+  correction → пользователь поправляет предыдущий ответ бота
+  uncertain  → непонятно, спросить уточнение
 
 Работает и без MongoDB — хранит факты в памяти процесса.
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,35 +21,64 @@ if TYPE_CHECKING:
     from .storage import Storage
 
 # ---------------------------------------------------------------------------
-# Классификация типа сообщения
+# Регулярки
+# ---------------------------------------------------------------------------
+
+# Фрустрация: маты, негатив, "не то", "не так"
+_FRUSTRATION_RE = re.compile(
+    r"(?:блять|бля[,!]|нахуй|нахер|пиздец|хуйня|ёбаный|ебаный|дебил|идиот"
+    r"|тупой|тупица|не то\b|не так\b|опять не так|снова не так|wtf\b|bullshit)",
+    re.IGNORECASE,
+)
+
+# Исправление: "нет, ...", "не так, ...", "неправильно"
+_CORRECTION_RE = re.compile(
+    r"^(?:нет[,!.\s]|не так[,!.\s]|неправильно[,!.\s]|неверно[,!.\s]"
+    r"|не верно[,!.\s]|ошибся[,!.\s]|это не так)",
+    re.IGNORECASE,
+)
+
+# Глоссарий: "SMI = SmartApp IDE", "mng — это MongoDB нода", "smi это ..."
+_GLOSSARY_RE = re.compile(
+    r"\b([a-zA-Z0-9_\-]{2,20})\s*(?:=|—\s*это|это\b|is\b|means?\b)\s+(.{3,120}?)(?:[.,;!?]|$)",
+    re.IGNORECASE,
+)
+
+# Упоминание человека с контекстом: "@frolov отвечает за X"
+_PERSON_MENTION_RE = re.compile(
+    r"@([\w._-]+)\s+(?:отвечает|занимается|владеет|ответственный|ответственна|leads?|owns?|manages?)"
+    r".{0,80}",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# LLM-промпты
 # ---------------------------------------------------------------------------
 
 _CLASSIFY_PROMPT = """\
 Классифицируй сообщение пользователя по одному из типов:
 
-  alert    — алерт мониторинга/пейджера (содержит hostname + метрику + статус WARN/CRIT/OK или время алерта)
-  fact     — ЧИСТОЕ утверждение об инфраструктуре без вопроса: "db-01 — мастер Postgres",
-             "серверы -mng- принадлежат @vasya". НЕ факт если есть "?", "что это", "расскажи", "покажи".
-  question — любой вопрос об инфраструктуре, сервере, документации; сообщения вида
-             "что это за сервер X?", "расскажи про X", "а вот этот X", "проверь X" — это question.
-             Если сообщение содержит hostname И вопросительные слова/знаки — это question, не fact.
-  chat     — приветствие, болтовня, благодарность, не связано с инфраструктурой
+  alert      — алерт мониторинга/пейджера (hostname + метрика + статус WARN/CRIT/OK)
+  fact       — ЧИСТОЕ утверждение об инфраструктуре без вопроса: "db-01 — мастер Postgres",
+               "серверы -mng- принадлежат @vasya". НЕ факт если есть "?", "что это", "расскажи".
+  question   — любой вопрос об инфраструктуре, сервере, человеке, документации;
+               "что это за сервер X?", "кто такой Фролов?", "расскажи про X" — question.
+               Если сообщение содержит hostname И вопросительные слова/знаки — question, не fact.
+  correction — начинается с "нет", "не так", "неправильно", "ошибся" и исправляет что-то сказанное ранее
+  chat       — приветствие, болтовня, благодарность, не связано с инфраструктурой
+  uncertain  — смысл неоднозначен, нельзя точно определить тип (confidence < 0.6)
 
 Примеры:
-  "а вот этот p-smi-mng-sc-msk02?"          → question (вопрос про сервер)
+  "а вот этот p-smi-mng-sc-msk02?"          → question
   "что это за сервер d-ihubcs-mng-adv-msk01" → question
-  "проверь документацию, db-prod-01"         → question
+  "кто такой @Фролов?"                       → question
   "db-prod-01 это мастер Postgres в проде"   → fact
-  "серверы -mng- принадлежат @vasya"         → fact
+  "нет, это не так — он в Dev, не в Prod"    → correction
   CRITICAL: High disk usage on db-01 at 14:05 → alert
 
-Ответь ТОЛЬКО валидным JSON без лишних символов:
+Ответь ТОЛЬКО валидным JSON:
 {"message_type": "question", "confidence": 0.97, "reason": "вопрос о конкретном сервере"}
 """
-
-# ---------------------------------------------------------------------------
-# Промпт: структурировать факт
-# ---------------------------------------------------------------------------
 
 _EXTRACT_FACT_PROMPT = """\
 Извлеки структурированный факт из сообщения для базы знаний DevOps/DBA команды.
@@ -60,13 +92,16 @@ fact_type:
   known_issue       — известная проблема и решение
   runbook           — инструкция по действиям
   on_call           — дежурства
+  person_info       — информация о человеке из команды
+  glossary_term     — расшифровка аббревиатуры/термина
   general           — прочее
 
 entities:
-  servers  — hostname или паттерны (например "-mng-", "db-prod-*")
-  users    — Mattermost username БЕЗ @ (например "ggmikvabiya")
-  tags     — теги (например ["mongodb", "prod"])
+  servers  — hostname или паттерны
+  users    — Mattermost username БЕЗ @
+  tags     — теги
   services — названия сервисов
+  people   — полные имена людей (если упоминаются)
 
 structured_updates — апдейты в server_registry (MongoDB синтаксис).
 
@@ -74,14 +109,25 @@ structured_updates — апдейты в server_registry (MongoDB синтакс
 {
   "fact_type": "server_ownership",
   "summary": "...",
-  "entities": {"servers": [], "users": [], "tags": [], "services": []},
+  "entities": {"servers": [], "users": [], "tags": [], "services": [], "people": []},
   "structured_updates": []
 }
 """
 
-# ---------------------------------------------------------------------------
-# Промпт: разбор алерта
-# ---------------------------------------------------------------------------
+_PERSON_EXTRACT_PROMPT = """\
+Извлеки информацию о человеке из сообщения.
+Если есть имя, ник, роль или зона ответственности — извлеки.
+Иначе верни {"found": false}.
+
+Ответь ТОЛЬКО валидным JSON:
+{"found": true, "username": "frolov_a", "display_name": "Александр Фролов", "role": "DBA", "expertise": ["PostgreSQL"]}
+{"found": false}
+
+Примеры:
+  "@frolov отвечает за PostgreSQL кластеры" → {"found": true, "username": "frolov", "display_name": "Frolov", "role": "DBA", "expertise": ["PostgreSQL"]}
+  "Александр Фролов — наш тимлид DBA"      → {"found": true, "username": "", "display_name": "Александр Фролов", "role": "тимлид DBA", "expertise": []}
+  "как настроить Nginx?"                    → {"found": false}
+"""
 
 _ANALYZE_ALERT_PROMPT = """\
 Ты — S.E.E.D., Senior DBA/DevOps. Пришёл алерт мониторинга.
@@ -95,8 +141,7 @@ _ANALYZE_ALERT_PROMPT = """\
 3. Дай 2-3 конкретных первых шага для диагностики (команды, что проверить)
 4. Оцени severity: критично прямо сейчас или можно разобраться спокойно?
 
-Стиль: неформально, как опытный коллега — не как автоматический отчёт.
-Не повторяй дословно текст алерта. Не пиши "Запомнил".
+Стиль: неформально, как опытный коллега. Не пиши "Запомнил" или "Принял".
 """
 
 
@@ -107,17 +152,59 @@ class KnowledgeManager:
         self._gc = gc
         self._storage = storage
         self._mem_facts: list[dict[str, Any]] = []
-        self._last_msg_type: str = "chat"  # последний классифицированный тип
+        self._mem_people: list[dict[str, Any]] = []
+        self._mem_terms: list[dict[str, Any]] = []
+        self._last_msg_type: str = "chat"
+
+    # ------------------------------------------------------------------
+    # Детекторы (быстрые, без LLM)
+    # ------------------------------------------------------------------
+
+    def is_frustrated(self, text: str) -> bool:
+        """True если сообщение выражает фрустрацию/негатив (feature 6)."""
+        return bool(_FRUSTRATION_RE.search(text))
+
+    def is_correction(self, text: str) -> bool:
+        """True если сообщение начинается с исправления (feature 3)."""
+        return bool(_CORRECTION_RE.match(text.strip()))
+
+    def extract_glossary_terms(self, text: str) -> list[tuple[str, str]]:
+        """Извлекает пары (термин, расшифровка) из текста (feature 4)."""
+        results = []
+        for m in _GLOSSARY_RE.finditer(text):
+            term = m.group(1).strip()
+            expansion = m.group(2).strip()
+            # Фильтр: термин ≤ 20 символов, расшифровка > 3
+            if 2 <= len(term) <= 20 and len(expansion) > 3:
+                results.append((term, expansion))
+        return results
 
     # ------------------------------------------------------------------
     # Основной метод — классифицирует и обрабатывает сообщение
     # ------------------------------------------------------------------
 
-    def process(self, text: str, user_id: str) -> str | None:
+    def process(
+        self,
+        text: str,
+        user_id: str,
+        channel_id: str = "",
+        thread_id: str = "",
+        in_thread: bool = False,
+    ) -> str | None:
         """
-        Возвращает готовый ответ если сообщение — факт или алерт.
-        Возвращает None если это обычный вопрос/чат (бот продолжает обычным путём).
+        Возвращает готовый ответ если сообщение — факт, алерт, коррекция.
+        Возвращает None если это обычный вопрос/чат.
+        Логирует пробелы в знаниях.
         """
+        # Автодетект терминов глоссария (без LLM, быстро)
+        terms = self.extract_glossary_terms(text)
+        for term, expansion in terms:
+            self._save_term(term, expansion, context=text[:100], added_by=user_id)
+
+        # Автодетект упоминаний людей (@username отвечает за X)
+        for m in _PERSON_MENTION_RE.finditer(text):
+            self._try_save_person_from_mention(m.group(0), user_id)
+
         classified = self._gc.json_extract(_CLASSIFY_PROMPT, text)
         if not classified:
             return None
@@ -131,10 +218,21 @@ class KnowledgeManager:
             flush=True,
         )
 
+        self._last_msg_type = msg_type
+
+        # feature 8: уточняющий вопрос при неуверенности
+        if msg_type == "uncertain" or (confidence < 0.6 and msg_type == "chat"):
+            return (
+                "Не уверен что правильно понял. Это вопрос про инфраструктуру "
+                "или просто поболтать? Уточни — отвечу точнее."
+            )
+
         if confidence < self.CONFIDENCE_THRESHOLD:
             return None
 
-        self._last_msg_type = msg_type
+        # feature 3: коррекция
+        if msg_type == "correction" or self.is_correction(text):
+            return self._handle_correction(text, user_id, in_thread)
 
         if msg_type == "fact":
             return self._handle_fact(text, user_id)
@@ -142,16 +240,90 @@ class KnowledgeManager:
         if msg_type == "alert":
             return self._handle_alert(text)
 
+        # feature 13: если вопрос остался без ответа (question/chat без данных)
+        if msg_type == "question" and self._storage and channel_id:
+            # Логируем как пробел — будет заполнен если бот ответил по Confluence/facts
+            # (resolve_gap вызывается в main.py после успешного ответа)
+            try:
+                self._storage.log_gap(text, user_id, channel_id, thread_id)
+            except Exception:
+                pass
+
         return None
 
+    def resolve_gap_if_answered(self, question: str) -> None:
+        """Помечает пробел решённым после успешного ответа бота."""
+        if self._storage:
+            try:
+                self._storage.resolve_gap(question)
+            except Exception:
+                pass
+
     def build_context_prompt(self, text: str) -> str:
-        """Инжектирует релевантные факты в системный промпт."""
+        """Инжектирует релевантные факты + глоссарий в контекст LLM (feature 9)."""
+        parts: list[str] = []
+
+        # Факты о серверах/людях
         facts = self._find_relevant_facts(text)
-        if not facts:
+        if facts:
+            lines = ["### Факты из базы знаний:"]
+            for f in facts:
+                lines.append(f"- [{f.get('fact_type', '?')}] {f.get('summary', '')}")
+            parts.append("\n".join(lines))
+
+        # Глоссарий (feature 4)
+        if self._storage:
+            try:
+                gloss = self._storage.build_glossary_context()
+                if gloss:
+                    parts.append(gloss)
+            except Exception:
+                pass
+        elif self._mem_terms:
+            lines = ["### Словарь команды:"]
+            for t in self._mem_terms[-20:]:
+                lines.append(f"- `{t['term']}` = {t['expansion']}")
+            parts.append("\n".join(lines))
+
+        return "\n\n".join(parts)
+
+    def build_people_context(self, text: str) -> str:
+        """Ищет упомянутых людей в базе и возвращает контекст."""
+        # Ищем @username и имена в тексте
+        mentions = re.findall(r"@([\w._-]+)", text)
+        names = re.findall(r"\b([А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+)\b", text)
+
+        results: list[dict[str, Any]] = []
+        if self._storage:
+            for m in mentions + names:
+                try:
+                    found = self._storage.find_person(m)
+                    results.extend(found)
+                except Exception:
+                    pass
+        else:
+            q_lower = text.lower()
+            for p in self._mem_people:
+                if (p.get("username", "").lower() in q_lower or
+                        p.get("display_name", "").lower() in q_lower):
+                    results.append(p)
+
+        if not results:
             return ""
-        lines = ["### Факты из базы знаний (используй при ответе):"]
-        for f in facts:
-            lines.append(f"- [{f.get('fact_type', '?')}] {f.get('summary', '')}")
+
+        seen: set[str] = set()
+        lines = ["### Люди из базы знаний:"]
+        for p in results:
+            key = p.get("username", p.get("display_name", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            line = f"- {p.get('display_name', p.get('username', '?'))}"
+            if p.get("role"):
+                line += f" — {p['role']}"
+            if p.get("expertise"):
+                line += f" (эксперт: {', '.join(p['expertise'])})"
+            lines.append(line)
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -175,6 +347,15 @@ class KnowledgeManager:
 
         print(f"[knowledge] saving fact type={fact_type!r} summary={summary[:80]!r}", flush=True)
 
+        # Автосохранение профиля человека из person_info (feature 1)
+        if fact_type == "person_info":
+            self._try_extract_and_save_person(text, entities, user_id)
+
+        # Автосохранение термина глоссария (feature 4)
+        if fact_type == "glossary_term":
+            for server in entities.get("services", []):
+                pass  # уже обработано через _GLOSSARY_RE выше
+
         if self._storage:
             try:
                 self._storage.save_fact(
@@ -189,28 +370,49 @@ class KnowledgeManager:
                 print(f"[knowledge] storage.save_fact error: {e}", flush=True)
 
         self._mem_facts.append({"fact_type": fact_type, "summary": summary, "entities": entities})
-        if len(self._mem_facts) > 100:
-            self._mem_facts = self._mem_facts[-100:]
+        if len(self._mem_facts) > 200:
+            self._mem_facts = self._mem_facts[-200:]
 
         return self._build_fact_confirmation(summary, entities, structured_updates)
+
+    # ------------------------------------------------------------------
+    # Обработка коррекции (feature 3)
+    # ------------------------------------------------------------------
+
+    def _handle_correction(self, text: str, user_id: str, in_thread: bool) -> str:
+        # Извлекаем исправленный факт
+        correction_text = _CORRECTION_RE.sub("", text).strip()
+        if not correction_text:
+            return "Что именно неверно? Поправь — я обновлю в базе."
+
+        # Сохраняем исправление как новый факт с пометкой
+        if self._storage:
+            try:
+                self._storage.save_fact(
+                    fact_type="correction",
+                    summary=f"[ИСПРАВЛЕНИЕ] {correction_text[:300]}",
+                    raw_text=text,
+                    entities={},
+                    created_by=user_id,
+                )
+            except Exception:
+                pass
+
+        return f"Принял поправку. Обновил в базе: {correction_text[:150]}"
 
     # ------------------------------------------------------------------
     # Обработка алерта
     # ------------------------------------------------------------------
 
     def _handle_alert(self, text: str) -> str:
-        # Ищем контекст о затронутых серверах из базы знаний
         context_facts = self._find_relevant_facts(text)
         context_block = ""
         if context_facts:
-            lines = []
-            for f in context_facts:
-                lines.append(f"- {f.get('summary', '')}")
+            lines = [f"- {f.get('summary', '')}" for f in context_facts]
             context_block = "Что известно о серверах из алерта:\n" + "\n".join(lines)
 
         system = _ANALYZE_ALERT_PROMPT.format(context=context_block or "(нет данных в базе знаний)")
 
-        # Сохраняем алерт в статистику
         if self._storage:
             try:
                 self._try_save_alert_stat(text)
@@ -220,22 +422,87 @@ class KnowledgeManager:
         return self._gc.chat(text, extra_context=system)
 
     def _try_save_alert_stat(self, text: str) -> None:
-        """Пробует распознать сервер и тип алерта и сохранить в alert_stats."""
-        import re
-        # Простая эвристика: hostname — первое слово перед ':'
         m = re.match(r"^([a-zA-Z0-9._-]+):\s*(.+?)(?:\n|$)", text.strip())
         if m and self._storage:
-            server = m.group(1)
-            alert_type = m.group(2)[:100]
-            self._storage.inc_alert(alert_type, server)
+            self._storage.inc_alert(m.group(2)[:100], m.group(1))
 
     # ------------------------------------------------------------------
-    # Поиск релевантных фактов
+    # Люди и глоссарий (без LLM)
+    # ------------------------------------------------------------------
+
+    def _save_term(self, term: str, expansion: str, context: str, added_by: str) -> None:
+        if self._storage:
+            try:
+                self._storage.save_term(term, expansion, context=context, added_by=added_by)
+            except Exception:
+                pass
+        else:
+            self._mem_terms.append({"term": term.lower(), "expansion": expansion})
+            if len(self._mem_terms) > 100:
+                self._mem_terms = self._mem_terms[-100:]
+
+    def _try_save_person_from_mention(self, text: str, user_id: str) -> None:
+        """Быстрое сохранение из '@username отвечает за X' (без LLM)."""
+        m = re.match(r"@([\w._-]+)\s+(.{5,80})", text, re.IGNORECASE)
+        if not m:
+            return
+        username = m.group(1)
+        context = m.group(2).strip()
+        role = context[:80]
+        if self._storage:
+            try:
+                self._storage.save_person(
+                    username=username,
+                    display_name=username,
+                    role=role,
+                    added_by=user_id,
+                )
+            except Exception:
+                pass
+        else:
+            self._mem_people.append({"username": username, "display_name": username, "role": role})
+
+    def _try_extract_and_save_person(
+        self, text: str, entities: dict[str, Any], user_id: str
+    ) -> None:
+        """LLM-экстракция профиля человека (feature 1)."""
+        try:
+            extracted = self._gc.json_extract(_PERSON_EXTRACT_PROMPT, text)
+        except Exception:
+            return
+        if not extracted or not extracted.get("found"):
+            return
+        username = extracted.get("username", "").strip().lstrip("@") or "unknown"
+        display_name = extracted.get("display_name", username)
+        role = extracted.get("role", "")
+        expertise = extracted.get("expertise", [])
+
+        if self._storage:
+            try:
+                self._storage.save_person(
+                    username=username,
+                    display_name=display_name,
+                    role=role,
+                    expertise=expertise,
+                    added_by=user_id,
+                )
+                print(f"[knowledge] saved person: {display_name!r} role={role!r}", flush=True)
+            except Exception as e:
+                print(f"[knowledge] save_person error: {e}", flush=True)
+        else:
+            self._mem_people.append({
+                "username": username,
+                "display_name": display_name,
+                "role": role,
+                "expertise": expertise,
+            })
+
+    # ------------------------------------------------------------------
+    # Поиск фактов
     # ------------------------------------------------------------------
 
     def _find_relevant_facts(self, text: str) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
-
         if self._storage:
             try:
                 facts = self._storage.search_facts(text, limit=5)
@@ -250,12 +517,12 @@ class KnowledgeManager:
                     [s.strip("-*").lower() for s in entities.get("servers", []) if s]
                     + [t.lower() for t in entities.get("tags", []) if t]
                     + [u.lower() for u in entities.get("users", []) if u]
+                    + [p.lower() for p in entities.get("people", []) if p]
                 )
                 if any(t and t in text_lower for t in all_terms):
                     facts.append(f)
                 if len(facts) >= 5:
                     break
-
         return facts
 
     # ------------------------------------------------------------------
@@ -274,6 +541,8 @@ class KnowledgeManager:
             details.append(f"паттерн: `{'`, `'.join(entities['servers'])}`")
         if entities.get("users"):
             details.append(f"ответственный: {', '.join('@' + u for u in entities['users'])}")
+        if entities.get("people"):
+            details.append(f"люди: {', '.join(entities['people'])}")
         if entities.get("tags"):
             details.append(f"теги: {', '.join(entities['tags'])}")
         if updates and self._storage:

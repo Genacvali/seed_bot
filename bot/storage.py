@@ -142,6 +142,21 @@ class Storage:
         idx(db.confluence_pages, [("space_key", ASCENDING)])
         idx(db.confluence_pages, [("added_by", ASCENDING)])
 
+        # 18. people — профили людей команды
+        idx(db.people, [("username", ASCENDING)], unique=True)
+        idx(db.people, [("display_name", "text"), ("role", "text")], name="people_fulltext")
+        idx(db.people, [("display_name", ASCENDING)])
+
+        # 19. glossary — словарь команды (аббревиатуры и термины)
+        idx(db.glossary, [("term", ASCENDING)], unique=True)
+        idx(db.glossary, [("term", "text"), ("expansion", "text"), ("context", "text")], name="glossary_fulltext")
+
+        # 20. knowledge_gaps — пробелы в знаниях (что бот не смог ответить)
+        idx(db.knowledge_gaps, [("question_hash", ASCENDING)], unique=True, name="gap_hash")
+        idx(db.knowledge_gaps, [("resolved", ASCENDING)])
+        idx(db.knowledge_gaps, [("times", DESCENDING)])
+        idx(db.knowledge_gaps, [("last_asked", DESCENDING)])
+
     # ------------------------------------------------------------------
     # 1. Dialog history
     # ------------------------------------------------------------------
@@ -236,11 +251,12 @@ class Storage:
         entities: dict[str, Any],
         created_by: str,
         structured_updates: list[dict[str, Any]] | None = None,
+        links: list[str] | None = None,
     ) -> str:
         """
         Сохраняет извлечённый факт.
-        structured_updates — список {collection, filter, update} для записи
-        в структурированные коллекции (server_registry и т.д.).
+        structured_updates — список {collection, filter, update}.
+        links — list[str] связанных fact_id или summary (feature 11).
         Возвращает строковый _id.
         """
         doc = {
@@ -250,15 +266,37 @@ class Storage:
             "entities": entities,
             "created_by": created_by,
             "created_at": _now(),
+            "history": [],       # feature 12: версионирование
+            "links": links or [], # feature 11: связи между сущностями
         }
         result = self._db.facts.insert_one(doc)
 
-        # Применяем структурированные апдейты в нужные коллекции
         for upd in (structured_updates or []):
             col = self._db[upd["collection"]]
             col.update_many(upd["filter"], upd["update"], upsert=upd.get("upsert", False))
 
         return str(result.inserted_id)
+
+    def update_fact(self, fact_id: str, new_summary: str, updated_by: str) -> bool:
+        """Обновляет факт, сохраняя старую версию в history (feature 12)."""
+        from bson import ObjectId
+        old = self._db.facts.find_one({"_id": ObjectId(fact_id)})
+        if not old:
+            return False
+        history_entry = {
+            "summary": old.get("summary", ""),
+            "raw_text": old.get("raw_text", ""),
+            "updated_at": _now(),
+            "updated_by": updated_by,
+        }
+        self._db.facts.update_one(
+            {"_id": ObjectId(fact_id)},
+            {
+                "$set": {"summary": new_summary, "updated_at": _now(), "updated_by": updated_by},
+                "$push": {"history": history_entry},
+            },
+        )
+        return True
 
     def search_facts(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Full-text поиск по базе знаний."""
@@ -382,6 +420,205 @@ class Storage:
             d["page_id"]
             for d in self._db.confluence_pages.find({}, {"page_id": 1, "_id": 0})
         ]
+
+    # ------------------------------------------------------------------
+    # 18. People — профили людей команды
+    # ------------------------------------------------------------------
+
+    def save_person(
+        self,
+        username: str,
+        display_name: str,
+        role: str = "",
+        expertise: list[str] | None = None,
+        added_by: str = "",
+    ) -> bool:
+        """Сохраняет или обновляет профиль человека. True = новый."""
+        result = self._db.people.update_one(
+            {"username": username.lower().lstrip("@")},
+            {
+                "$set": {
+                    "display_name": display_name,
+                    "role": role,
+                    "expertise": expertise or [],
+                    "added_by": added_by,
+                    "updated_at": _now(),
+                },
+                "$setOnInsert": {"created_at": _now()},
+            },
+            upsert=True,
+        )
+        return result.upserted_id is not None
+
+    def find_person(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Ищет человека по имени, нику, роли."""
+        q = query.strip()
+        return list(
+            self._db.people.find(
+                {
+                    "$or": [
+                        {"username": {"$regex": q, "$options": "i"}},
+                        {"display_name": {"$regex": q, "$options": "i"}},
+                        {"role": {"$regex": q, "$options": "i"}},
+                    ]
+                },
+                {"_id": 0},
+            ).limit(limit)
+        )
+
+    def list_people(self, limit: int = 50) -> list[dict[str, Any]]:
+        return list(
+            self._db.people.find({}, {"_id": 0}).sort("display_name", ASCENDING).limit(limit)
+        )
+
+    def get_user_profile(self, user_id: str) -> dict[str, Any] | None:
+        return self._db.user_preferences.find_one({"user_id": user_id}, {"_id": 0})
+
+    def upsert_user_profile(self, user_id: str, **fields: Any) -> None:
+        """Обновляет поля профиля пользователя (feature 5)."""
+        self._db.user_preferences.update_one(
+            {"user_id": user_id},
+            {"$set": {**fields, "updated_at": _now()}, "$setOnInsert": {"created_at": _now()}},
+            upsert=True,
+        )
+
+    # ------------------------------------------------------------------
+    # 19. Glossary — словарь команды
+    # ------------------------------------------------------------------
+
+    def save_term(
+        self,
+        term: str,
+        expansion: str,
+        context: str = "",
+        added_by: str = "",
+    ) -> bool:
+        """Сохраняет термин/аббревиатуру. True = новый."""
+        result = self._db.glossary.update_one(
+            {"term": term.lower().strip()},
+            {
+                "$set": {
+                    "expansion": expansion,
+                    "context": context,
+                    "added_by": added_by,
+                    "updated_at": _now(),
+                },
+                "$setOnInsert": {"created_at": _now()},
+            },
+            upsert=True,
+        )
+        return result.upserted_id is not None
+
+    def find_term(self, term: str) -> dict[str, Any] | None:
+        return self._db.glossary.find_one({"term": term.lower().strip()}, {"_id": 0})
+
+    def search_glossary(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        q = query.strip()
+        return list(
+            self._db.glossary.find(
+                {
+                    "$or": [
+                        {"term": {"$regex": q, "$options": "i"}},
+                        {"expansion": {"$regex": q, "$options": "i"}},
+                    ]
+                },
+                {"_id": 0},
+            ).limit(limit)
+        )
+
+    def list_terms(self, limit: int = 100) -> list[dict[str, Any]]:
+        return list(
+            self._db.glossary.find({}, {"_id": 0}).sort("term", ASCENDING).limit(limit)
+        )
+
+    def build_glossary_context(self) -> str:
+        """Строит блок контекста из словаря для инжекции в промпт LLM."""
+        terms = self.list_terms(limit=30)
+        if not terms:
+            return ""
+        lines = ["### Словарь команды (расшифровки аббревиатур):"]
+        for t in terms:
+            line = f"- `{t['term']}` = {t['expansion']}"
+            if t.get("context"):
+                line += f"  ({t['context']})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 20. Knowledge gaps — пробелы в знаниях
+    # ------------------------------------------------------------------
+
+    def log_gap(
+        self,
+        question: str,
+        user_id: str,
+        channel_id: str,
+        thread_id: str,
+    ) -> None:
+        """Логирует вопрос, на который бот не смог ответить."""
+        h = abs(hash(question.strip().lower())) % (10 ** 9)
+        self._db.knowledge_gaps.update_one(
+            {"question_hash": h},
+            {
+                "$set": {"question": question[:500], "last_asked": _now()},
+                "$inc": {"times": 1},
+                "$setOnInsert": {
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "resolved": False,
+                    "created_at": _now(),
+                },
+            },
+            upsert=True,
+        )
+
+    def get_gaps(self, resolved: bool = False, limit: int = 10) -> list[dict[str, Any]]:
+        return list(
+            self._db.knowledge_gaps.find(
+                {"resolved": resolved},
+                {"_id": 0, "question": 1, "times": 1, "last_asked": 1, "channel_id": 1},
+            )
+            .sort([("times", DESCENDING), ("last_asked", DESCENDING)])
+            .limit(limit)
+        )
+
+    def resolve_gap(self, question: str) -> int:
+        """Помечает gap как решённый по точному вопросу. Возвращает кол-во обновлённых."""
+        h = abs(hash(question.strip().lower())) % (10 ** 9)
+        r = self._db.knowledge_gaps.update_one(
+            {"question_hash": h}, {"$set": {"resolved": True}}
+        )
+        return r.modified_count
+
+    def get_weekly_learning_digest(self) -> dict[str, Any]:
+        """Данные для еженедельного дайджеста обучения (feature 14)."""
+        from datetime import timedelta
+        week_ago = _now() - timedelta(days=7)
+
+        new_facts = self._db.facts.count_documents({"created_at": {"$gte": week_ago}})
+        new_people = self._db.people.count_documents({"created_at": {"$gte": week_ago}})
+        new_terms = self._db.glossary.count_documents({"created_at": {"$gte": week_ago}})
+
+        # Кто больше всего учил бота
+        top_teachers_cursor = self._db.facts.aggregate([
+            {"$match": {"created_at": {"$gte": week_ago}}},
+            {"$group": {"_id": "$created_by", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 5},
+        ])
+        top_teachers = list(top_teachers_cursor)
+
+        # Топ пробелов
+        gaps = self.get_gaps(resolved=False, limit=5)
+
+        return {
+            "new_facts": new_facts,
+            "new_people": new_people,
+            "new_terms": new_terms,
+            "top_teachers": top_teachers,
+            "top_gaps": gaps,
+        }
 
     # ------------------------------------------------------------------
     # Daily digest
