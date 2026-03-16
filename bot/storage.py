@@ -26,10 +26,22 @@ from typing import Any
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.errors import OperationFailure
 
 from .config import Config
 
 _DAY = 60 * 60 * 24
+
+
+def _create_index_safe(collection: Collection[Any], keys: Any, **kwargs: Any) -> None:
+    """Создаёт индекс; игнорирует ошибки «уже существует» / «другое имя» (85, 86)."""
+    try:
+        collection.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        if e.code in (85, 86):  # IndexOptionsConflict, IndexKeySpecsConflict
+            pass  # индекс уже есть или с другим именем — ок
+        else:
+            raise
 
 
 class Storage:
@@ -46,89 +58,83 @@ class Storage:
 
     def _ensure_indexes(self) -> None:
         db = self._db
+        idx = _create_index_safe
 
-        # 1. dialog_history — TTL 7 дней
-        db.dialog_history.create_index("created_at", expireAfterSeconds=_DAY * 7)
-        db.dialog_history.create_index([("thread_id", ASCENDING), ("created_at", ASCENDING)])
-        db.dialog_history.create_index("user_id")
+        # 1. dialog_history — TTL 7 дней (имена как в mongo_init.py, иначе конфликт)
+        idx(db.dialog_history, [("created_at", ASCENDING)], expireAfterSeconds=_DAY * 7, name="ttl_7d")
+        idx(db.dialog_history, [("thread_id", ASCENDING), ("created_at", ASCENDING)], name="thread_time")
+        idx(db.dialog_history, [("user_id", ASCENDING)], name="user")
 
         # 2. alert_stats — уникальность по (alert_type, server)
-        db.alert_stats.create_index(
-            [("alert_type", ASCENDING), ("server", ASCENDING)],
-            unique=True,
-        )
-        db.alert_stats.create_index("last_fired_at")
+        idx(db.alert_stats, [("alert_type", ASCENDING), ("server", ASCENDING)], unique=True, name="alert_server_unique")
+        idx(db.alert_stats, [("last_fired_at", DESCENDING)], name="last_fired")
 
         # 3. alert_rules
-        db.alert_rules.create_index("pattern", unique=True)
-        db.alert_rules.create_index("enabled")
+        idx(db.alert_rules, [("pattern", ASCENDING)], unique=True, name="pattern_unique")
+        idx(db.alert_rules, [("enabled", ASCENDING)], name="enabled")
 
         # 4. known_incidents
-        db.known_incidents.create_index([("tags", ASCENDING)])
-        db.known_incidents.create_index([("title", "text"), ("description", "text")])
+        idx(db.known_incidents, [("tags", ASCENDING)])
+        idx(db.known_incidents, [("title", "text"), ("description", "text")])
 
         # 5. runbooks
-        db.runbooks.create_index([("title", "text"), ("content", "text")])
-        db.runbooks.create_index("tags")
+        idx(db.runbooks, [("title", "text"), ("content", "text")])
+        idx(db.runbooks, [("tags", ASCENDING)])
 
         # 6. server_registry
-        db.server_registry.create_index("hostname", unique=True)
-        db.server_registry.create_index("env")   # prod / staging / dev
-        db.server_registry.create_index("role")  # db / app / cache / ...
+        idx(db.server_registry, [("hostname", ASCENDING)], unique=True)
+        idx(db.server_registry, [("env", ASCENDING)])
+        idx(db.server_registry, [("role", ASCENDING)])
 
         # 7. user_preferences
-        db.user_preferences.create_index("user_id", unique=True)
+        idx(db.user_preferences, [("user_id", ASCENDING)], unique=True)
 
         # 8. channel_settings
-        db.channel_settings.create_index("channel_id", unique=True)
+        idx(db.channel_settings, [("channel_id", ASCENDING)], unique=True)
 
         # 9. command_shortcuts
-        db.command_shortcuts.create_index(
-            [("user_id", ASCENDING), ("shortcut", ASCENDING)],
-            unique=True,
-        )
+        idx(db.command_shortcuts, [("user_id", ASCENDING), ("shortcut", ASCENDING)], unique=True)
 
         # 10. feedback
-        db.feedback.create_index("post_id", unique=True)
-        db.feedback.create_index("user_id")
-        db.feedback.create_index("rating")
+        idx(db.feedback, [("post_id", ASCENDING)], unique=True)
+        idx(db.feedback, [("user_id", ASCENDING)])
+        idx(db.feedback, [("rating", ASCENDING)])
 
         # 11. bot_errors — TTL 30 дней
-        db.bot_errors.create_index("created_at", expireAfterSeconds=_DAY * 30)
-        db.bot_errors.create_index("error_type")
+        idx(db.bot_errors, [("created_at", ASCENDING)], expireAfterSeconds=_DAY * 30, name="ttl_30d")
+        idx(db.bot_errors, [("error_type", ASCENDING)], name="error_type")
+        idx(db.bot_errors, [("created_at", DESCENDING)], name="created_desc")
 
         # 12. on_call_schedule
-        db.on_call_schedule.create_index([("start_at", ASCENDING), ("end_at", ASCENDING)])
-        db.on_call_schedule.create_index("user_id")
+        idx(db.on_call_schedule, [("start_at", ASCENDING), ("end_at", ASCENDING)], name="period")
+        idx(db.on_call_schedule, [("user_id", ASCENDING)], name="user")
 
         # 13. escalation_log — TTL 90 дней
-        db.escalation_log.create_index("created_at", expireAfterSeconds=_DAY * 90)
-        db.escalation_log.create_index("alert_type")
-        db.escalation_log.create_index("resolved")
+        idx(db.escalation_log, [("created_at", ASCENDING)], expireAfterSeconds=_DAY * 90, name="ttl_90d")
+        idx(db.escalation_log, [("alert_type", ASCENDING)], name="alert_type")
+        idx(db.escalation_log, [("resolved", ASCENDING)], name="resolved")
+        idx(db.escalation_log, [("created_at", DESCENDING)], name="created_desc")
 
         # 14. metrics_snapshot — TTL 30 дней
-        db.metrics_snapshot.create_index("created_at", expireAfterSeconds=_DAY * 30)
-        db.metrics_snapshot.create_index([("server", ASCENDING), ("created_at", DESCENDING)])
+        idx(db.metrics_snapshot, [("created_at", ASCENDING)], expireAfterSeconds=_DAY * 30, name="ttl_30d")
+        idx(db.metrics_snapshot, [("server", ASCENDING), ("created_at", DESCENDING)], name="server_time")
 
         # 15. bot_usage_stats
-        db.bot_usage_stats.create_index(
-            [("user_id", ASCENDING), ("date", ASCENDING)],
-            unique=True,
-        )
+        idx(db.bot_usage_stats, [("user_id", ASCENDING), ("date", ASCENDING)], unique=True, name="user_date_unique")
 
         # 16. facts — база знаний, извлечённая из диалогов
-        db.facts.create_index([("summary", "text"), ("raw_text", "text")], name="fulltext")
-        db.facts.create_index("fact_type")
-        db.facts.create_index("entities.users")
-        db.facts.create_index("entities.servers")
-        db.facts.create_index("entities.tags")
-        db.facts.create_index("created_by")
-        db.facts.create_index("created_at")
+        idx(db.facts, [("summary", "text"), ("raw_text", "text")], name="fulltext")
+        idx(db.facts, [("fact_type", ASCENDING)])
+        idx(db.facts, [("entities.users", ASCENDING)])
+        idx(db.facts, [("entities.servers", ASCENDING)])
+        idx(db.facts, [("entities.tags", ASCENDING)])
+        idx(db.facts, [("created_by", ASCENDING)])
+        idx(db.facts, [("created_at", ASCENDING)])
 
         # 17. confluence_pages — страницы Confluence для поиска серверов
-        db.confluence_pages.create_index("page_id", unique=True)
-        db.confluence_pages.create_index("space_key")
-        db.confluence_pages.create_index("added_by")
+        idx(db.confluence_pages, [("page_id", ASCENDING)], unique=True)
+        idx(db.confluence_pages, [("space_key", ASCENDING)])
+        idx(db.confluence_pages, [("added_by", ASCENDING)])
 
     # ------------------------------------------------------------------
     # 1. Dialog history

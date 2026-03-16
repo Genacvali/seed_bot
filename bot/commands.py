@@ -49,8 +49,8 @@ HELP_TEXT = """\
 """
 
 _CMD_RE = re.compile(
-    r"(?:^|\s)"
-    r"(?:find|найди|поищи)\s+(.+)",
+    r"(?:^|\s)(?:find|найди|поищи)\s+(.+)",
+    re.IGNORECASE,
     re.IGNORECASE,
 )
 
@@ -103,11 +103,11 @@ def handle(
             r"\b(?:в\s+документации|в\s+доках?|in\s+docs?|in\s+documentation|из\s+документации)\b",
             "", query, flags=re.IGNORECASE,
         ).strip()
-        # Если похоже на хостнейм — идём в Confluence
+        # Если похоже на хостнейм — идём в Confluence (ищем по имени сервера)
         from .confluence_intent import extract_hostnames
         hostnames = extract_hostnames(query_clean)
         if hostnames and confluence:
-            return _cmd_server(query_clean, confluence, gc, storage)
+            return _cmd_server(hostnames[0], confluence, gc, storage)
         return _cmd_find(query_clean or query, storage, confluence, gc)
 
     # save — сохранить тред как known issue
