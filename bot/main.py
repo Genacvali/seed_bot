@@ -130,8 +130,14 @@ def main() -> None:
         thread_id: str,
         user_id: str,
         extra_context: str,
+        use_history: bool = True,
     ) -> None:
-        """Создаёт пост-заглушку, стримит ответ, редактирует по мере поступления."""
+        """Создаёт пост-заглушку, стримит ответ, редактирует по мере поступления.
+
+        use_history=False — не передавать историю треда в GigaChat.
+        Используется для Confluence-запросов, чтобы старые сообщения треда
+        не «перетягивали» ответ на другую тему.
+        """
         placeholder = mm.create_post(channel_id, "⏳", root_id=root_id)
         post_id = placeholder["id"]
 
@@ -148,7 +154,7 @@ def main() -> None:
         try:
             answer = gc.chat(
                 prompt,
-                thread_id=thread_id,
+                thread_id=thread_id if use_history else None,
                 user_id=user_id,
                 extra_context=extra_context,
                 on_chunk=on_chunk if cfg.gigachat_streaming else None,
@@ -320,7 +326,8 @@ def main() -> None:
                             except Exception:
                                 pass
                             post_streaming(
-                                ev.channel_id, root_id, prompt, thread_id, ev.user_id, extra_context
+                                ev.channel_id, root_id, prompt, thread_id, ev.user_id,
+                                extra_context, use_history=False,
                             )
                             return
                         elif page_ids:
@@ -356,7 +363,8 @@ def main() -> None:
                         except Exception:
                             pass
                         post_streaming(
-                            ev.channel_id, root_id, prompt, thread_id, ev.user_id, extra_context
+                            ev.channel_id, root_id, prompt, thread_id, ev.user_id,
+                            extra_context, use_history=False,
                         )
                         return
 
