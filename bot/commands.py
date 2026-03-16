@@ -94,11 +94,21 @@ def handle(
     if p in ("stats", "статистика", "алерты"):
         return _cmd_stats(storage)
 
-    # find / найди
+    # find / найди — роутим в Confluence если запрос похож на сервер или явно упоминает доки
     m = _CMD_RE.search(clean_prompt)
     if m:
         query = m.group(1).strip()
-        return _cmd_find(query, storage)
+        # Убираем слова-уточнения: "в документации", "в доках", "in docs" и т.д.
+        query_clean = re.sub(
+            r"\b(?:в\s+документации|в\s+доках?|in\s+docs?|in\s+documentation|из\s+документации)\b",
+            "", query, flags=re.IGNORECASE,
+        ).strip()
+        # Если похоже на хостнейм — идём в Confluence
+        from .confluence_intent import extract_hostnames
+        hostnames = extract_hostnames(query_clean)
+        if hostnames and confluence:
+            return _cmd_server(query_clean, confluence, gc, storage)
+        return _cmd_find(query_clean or query, storage, confluence, gc)
 
     # save — сохранить тред как known issue
     if p in ("save", "сохранить", "записать", "save issue"):
@@ -364,24 +374,65 @@ def _cmd_stats(storage: "Storage | None") -> CommandResult:
     return CommandResult("\n".join(lines))
 
 
-def _cmd_find(query: str, storage: "Storage | None") -> CommandResult:
-    if not storage:
-        return CommandResult("MongoDB не подключён — поиск по базе знаний недоступен.")
-    try:
-        facts = storage.search_facts(query, limit=7)
-    except Exception as e:
-        return CommandResult(f"Ошибка поиска: {e}")
+def _cmd_find(
+    query: str,
+    storage: "Storage | None",
+    confluence: "ConfluenceClient | None" = None,
+    gc: "GigaChatClient | None" = None,
+) -> CommandResult:
+    results: list[str] = []
 
-    if not facts:
-        return CommandResult(f"По запросу «{query}» ничего не найдено в базе знаний.")
+    # 1. Поиск в MongoDB (факты из диалогов)
+    if storage:
+        try:
+            facts = storage.search_facts(query, limit=7)
+            if facts:
+                results.append(f"**Из базы знаний по «{query}»:**")
+                for f in facts:
+                    ft = f.get("fact_type", "?")
+                    summary = f.get("summary", "")
+                    results.append(f"- `[{ft}]` {summary}")
+        except Exception as e:
+            results.append(f"_Ошибка поиска в базе знаний: {e}_")
 
-    lines = [f"**Результаты поиска «{query}»:**", ""]
-    for f in facts:
-        ft = f.get("fact_type", "?")
-        summary = f.get("summary", "")
-        lines.append(f"- `[{ft}]` {summary}")
+    # 2. Поиск в Confluence
+    if confluence:
+        page_ids = _get_page_ids(confluence, storage)
+        if page_ids:
+            all_records = []
+            for page_id in page_ids:
+                try:
+                    found = confluence.search_all_children(page_id, query)
+                    all_records.extend(found)
+                except Exception as e:
+                    print(f"[confluence] find error page={page_id}: {e}", flush=True)
 
-    return CommandResult("\n".join(lines))
+            # Дедупликация
+            seen: set[str] = set()
+            unique: list = []
+            for rec in all_records:
+                if rec.server.lower() not in seen:
+                    seen.add(rec.server.lower())
+                    unique.append(rec)
+
+            if unique:
+                results.append(f"\n**Из Confluence по «{query}»:**")
+                results.append(f"Нашёл {len(unique)} сервер(ов):\n")
+                for rec in unique[:10]:
+                    line = f"- `{rec.short_name()}` | {rec.env} | {rec.ip} | {rec.version} | ЦОД {rec.dc}"
+                    results.append(line)
+                if len(unique) > 10:
+                    results.append(f"_…и ещё {len(unique) - 10}. Уточни запрос._")
+
+    if not results:
+        hint = ""
+        if not storage and not confluence:
+            hint = "\n_MongoDB и Confluence не подключены._"
+        elif not storage:
+            hint = "\n_MongoDB не подключён — факты из диалогов не сохраняются._"
+        return CommandResult(f"По запросу «{query}» ничего не найдено.{hint}")
+
+    return CommandResult("\n".join(results))
 
 
 def _cmd_save(
