@@ -247,18 +247,27 @@ def build_server_context(
             lines.append(f"- Источник: {rec.page_title}")
         lines.append("")
 
-    if contacts_by_page:
-        for rec in records[:8]:
-            pid = rec.page_id
-            if pid and pid not in seen_pages_contacts:
-                contacts = contacts_by_page.get(pid)
-                if contacts:
-                    seen_pages_contacts.add(pid)
-                    lines.append(
-                        f"**Ответственные за '{rec.page_title or pid}':** "
-                        f"{', '.join(contacts)}"
-                    )
-                    lines.append("")
+    # Контакты: явно указываем есть / нет — чтобы LLM не выдумывал
+    checked_pages: set[str] = set()
+    for rec in records[:8]:
+        pid = rec.page_id
+        if not pid or pid in checked_pages:
+            continue
+        checked_pages.add(pid)
+        if contacts_by_page is not None:
+            contacts = contacts_by_page.get(pid)
+            if contacts:
+                seen_pages_contacts.add(pid)
+                lines.append(
+                    f"**Ответственные за '{rec.page_title or pid}':** "
+                    f"{', '.join(contacts)}"
+                )
+            else:
+                lines.append(
+                    f"**Ответственные за '{rec.page_title or pid}':** "
+                    f"не указаны в документации — НЕ ВЫДУМЫВАЙ имена"
+                )
+            lines.append("")
 
     if len(records) > 8:
         lines.append(f"_(и ещё {len(records) - 8} записей)_")

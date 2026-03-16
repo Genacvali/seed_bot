@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -17,6 +18,56 @@ if TYPE_CHECKING:
 
 
 OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+
+
+def _parse_json_safe(raw: str) -> dict:
+    """
+    Парсит JSON из ответа LLM.
+    Обрабатывает: ```json ... ```, лишние символы вокруг, типичные опечатки GigaChat.
+    """
+    raw = raw.strip()
+
+    # Убираем код-блок ```json ... ```
+    if "```" in raw:
+        parts = raw.split("```")
+        for part in parts:
+            candidate = part.lstrip("json").strip()
+            if candidate.startswith("{"):
+                raw = candidate
+                break
+
+    # Находим первый {...} блок
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        raw = raw[start:end + 1]
+    else:
+        print(f"[gigachat] json_extract: no JSON object found in {raw[:120]!r}", flush=True)
+        return {}
+
+    # Пробуем как есть
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Автоматический ремонт типичных ошибок GigaChat:
+    repaired = raw
+    # {:"key"  или  {:key"  → {"key"  (лишнее двоеточие в начале объекта, пропущена кавычка)
+    repaired = re.sub(r'\{(\s*):(\s*)"', r'{\1"\2', repaired)  # {:"key → {"key  (ключ с кавычкой)
+    repaired = re.sub(r'\{(\s*):(\s*)(\w)', r'{\1"\3', repaired)  # {:key → {"key (без кавычки)
+    repaired = re.sub(r",\s*}", "}", repaired)                  # trailing comma before }
+    repaired = re.sub(r",\s*]", "]", repaired)                  # trailing comma before ]
+    repaired = re.sub(r"'([^']*)'", r'"\1"', repaired)         # single → double quotes
+    repaired = re.sub(r'""(\w)', r'"\1', repaired)             # double-double-quote artifact
+
+    try:
+        result = json.loads(repaired)
+        print(f"[gigachat] json_extract: repaired JSON OK", flush=True)
+        return result
+    except json.JSONDecodeError as e:
+        print(f"[gigachat] json_extract parse error (even after repair): {e} | raw={raw[:200]!r}", flush=True)
+        return {}
 CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """\
@@ -40,16 +91,18 @@ Ansible, Terraform, Linux, мониторинг (Prometheus/Grafana), бэкап
 Когда в контексте присутствует блок "## Данные из документации Confluence" — \
 используй эти данные как достоверный источник. Отвечай только на основе этих данных, не выдумывай факты.
 
-**Правила работы с данными документации:**
-- Имена серверов — ВСЕГДА пиши полностью: `p-smi-mng-sc-msk01`, а НЕ «msk01», «msk02», «первый сервер» и т.д.
-- Поле «Кластер (replica set)»: если там написано «N ноды» и перечислены имена — пиши все полные имена через запятую.
-- Поле «Ответственные» — используй эти имена для ответов про владельца/ответственного.
-- Если поле «Кластер» говорит «нет данных» — не придумывай кластер.
+**Правила работы с данными документации (строго обязательны):**
+- Имена серверов — ВСЕГДА пиши ПОЛНОСТЬЮ как в данных: `p-smi-mng-sc-msk01`. \
+  Никогда НЕ сокращай до «msk01», «msk02», «первый», «второй» и т.д.
+- Поле «Кластер (replica set)»: если написано «N ноды: имя1, имя2» — перечисляй ТОЧНО эти полные имена.
+- Поле «Ответственные»: если написано «не указаны в документации» — так и скажи: \
+  «ответственных в документации нет». НЕ ВЫДУМЫВАЙ имена.
+- Если поля «Кластер» нет или написано «нет данных» — не придумывай кластер.
 
 Пример правильного ответа:
-"Да, `p-smi-mng-sc-msk02` — PSMDB (MongoDB), прод, ЦОД SC. \
-Входит в кластер из 2 нод: `p-smi-mng-sc-msk01`, `p-smi-mng-sc-msk02`. \
-Ответственные: Ермошин А.А., Солмин В.Е."
+"`p-smi-mng-sc-msk02` — PSMDB (MongoDB), прод, ЦОД SC. \
+Кластер из 2 нод: `p-smi-mng-sc-msk01`, `p-smi-mng-sc-msk02`. \
+Ответственных в документации не указано."
 
 ## Режим запоминания фактов
 Когда пользователь сообщает тебе ФАКТ об инфраструктуре (не вопрос, а утверждение) — \
@@ -331,14 +384,4 @@ class GigaChatClient:
             return {}
 
         raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        # Вырезаем JSON из ответа (модель иногда оборачивает в ```json ... ```)
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        try:
-            return json.loads(raw.strip())
-        except Exception:
-            print(f"[gigachat] json_extract parse error, raw={raw[:200]!r}", flush=True)
-            return {}
+        return _parse_json_safe(raw)
