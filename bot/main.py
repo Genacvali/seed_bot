@@ -263,6 +263,18 @@ def main() -> None:
                     if not page_ids:
                         page_ids = getattr(confluence, "_cfg_pages", [])
 
+                    # Нет ни одной страницы — объясняем как добавить, не падаем дальше
+                    if not page_ids:
+                        names = ", ".join(f"`{h}`" for h in intent.hostnames)
+                        mm.create_post(
+                            ev.channel_id,
+                            f"Хочу найти {names} в документации, но ни одной страницы Confluence ещё не добавлено.\n"
+                            f"Скинь ссылку — проиндексирую:\n"
+                            f"> @{cfg.mattermost_bot_username} вот доки https://confluence.example.com/display/SPACE/Page",
+                            root_id=root_id,
+                        )
+                        return
+
                     if page_ids:
                         all_records = []
                         for hostname in intent.hostnames:

@@ -42,7 +42,11 @@ def _parse_json_safe(raw: str) -> dict:
     if start != -1 and end != -1 and end > start:
         raw = raw[start:end + 1]
     else:
-        print(f"[gigachat] json_extract: no JSON object found in {raw[:120]!r}", flush=True)
+        # JSON-скобок нет — сразу regex fallback
+        result = _regex_extract_kv(raw)
+        if result:
+            print(f"[gigachat] json_extract: regex fallback (no braces) {list(result.keys())}", flush=True)
+            return result
         return {}
 
     # Пробуем как есть
@@ -53,9 +57,22 @@ def _parse_json_safe(raw: str) -> dict:
 
     # Автоматический ремонт типичных ошибок GigaChat:
     repaired = raw
-    # {:"key"  или  {:key"  → {"key"  (лишнее двоеточие в начале объекта, пропущена кавычка)
-    repaired = re.sub(r'\{(\s*):(\s*)"', r'{\1"\2', repaired)  # {:"key → {"key  (ключ с кавычкой)
-    repaired = re.sub(r'\{(\s*):(\s*)(\w)', r'{\1"\3', repaired)  # {:key → {"key (без кавычки)
+
+    # {:"key"  или  {:key"  → {"key"  (лишнее двоеточие в начале объекта)
+    repaired = re.sub(r'\{(\s*):(\s*)"', r'{\1"', repaired)
+    repaired = re.sub(r'\{(\s*):(\s*)(\w)', r'{\1"\3', repaired)
+
+    # "key"value  →  "key": value  (пропущено двоеточие между ключом и значением)
+    # "confidence"0.85  →  "confidence": 0.85
+    # "message_type""fact"  →  "message_type": "fact"
+    repaired = re.sub(r'("[\w_]+")\s*"', r'\1: "', repaired)    # "key""val" → "key": "val"
+    repaired = re.sub(r'("[\w_]+")\s*([\d\.\-])', r'\1: \2', repaired)  # "key"0.9 → "key": 0.9
+    repaired = re.sub(r'("[\w_]+")\s*(\{)', r'\1: \2', repaired)  # "key"{ → "key": {
+    repaired = re.sub(r'("[\w_]+")\s*(\[)', r'\1: \2', repaired)  # "key"[ → "key": [
+
+    # "reason" "text" → "reason": "text"  (пропущено двоеточие перед строкой)
+    repaired = re.sub(r'("[\w_]+")\s+(")', r'\1: \2', repaired)
+
     repaired = re.sub(r",\s*}", "}", repaired)                  # trailing comma before }
     repaired = re.sub(r",\s*]", "]", repaired)                  # trailing comma before ]
     repaired = re.sub(r"'([^']*)'", r'"\1"', repaired)         # single → double quotes
@@ -65,9 +82,41 @@ def _parse_json_safe(raw: str) -> dict:
         result = json.loads(repaired)
         print(f"[gigachat] json_extract: repaired JSON OK", flush=True)
         return result
-    except json.JSONDecodeError as e:
-        print(f"[gigachat] json_extract parse error (even after repair): {e} | raw={raw[:200]!r}", flush=True)
-        return {}
+    except json.JSONDecodeError:
+        pass
+
+    # Последний resort: regex-экстракция ключей напрямую из любого мусора
+    result = _regex_extract_kv(raw)
+    if result:
+        print(f"[gigachat] json_extract: regex fallback extracted {list(result.keys())}", flush=True)
+        return result
+
+    print(f"[gigachat] json_extract parse error (all methods failed): raw={raw[:200]!r}", flush=True)
+    return {}
+
+
+def _regex_extract_kv(s: str) -> dict:
+    """
+    Последний шанс — вытаскиваем known-поля из любой сломанной строки.
+    Работает с: {key"val", "key"val", {:key"val"} и т.д.
+    """
+    result: dict = {}
+    # message_type — ищем одно из известных значений
+    m = re.search(r'\b(alert|fact|question|chat)\b', s, re.IGNORECASE)
+    if m:
+        result["message_type"] = m.group(1).lower()
+    # confidence — число 0.x или 1.0 (рус/анг вариант)
+    m = re.search(r'(?:confidence|уверенность|уверен)["\s:]*(0?\.\d+|1\.0)', s, re.IGNORECASE)
+    if m:
+        try:
+            result["confidence"] = float(m.group(1))
+        except ValueError:
+            pass
+    # reason — любая строка после "reason"
+    m = re.search(r'reason["\s:]+([^"}\]]{4,120})', s)
+    if m:
+        result["reason"] = m.group(1).strip().strip('"').strip("'")
+    return result
 CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """\
