@@ -194,12 +194,16 @@ def build_server_context(
         by_cluster.setdefault(key, []).append(rec)
 
     lines = [
-        f"## Данные из документации Confluence по запросу «{query}»\n",
-        "Используй эти данные для ответа. Если в одной среде и ЦОД несколько нод с общим префиксом имени — это кластер (replica set). Контакты — ответственные за сервис.\n",
+        f"## Данные из документации Confluence по запросу «{query}»",
+        "",
+        "ВАЖНО: имена серверов — полные, не сокращай их. "
+        "Пиши `p-smi-mng-sc-msk01`, а НЕ «msk01» или «первый».",
+        "",
     ]
     seen_pages_contacts: set[str] = set()
     for rec in records[:8]:
-        lines.append(f"### {rec.server}")
+        short = rec.short_name()
+        lines.append(f"### {short}  ({rec.server})")
         if rec.env:
             lines.append(f"- Среда: {rec.env}")
         if rec.ip:
@@ -210,14 +214,25 @@ def build_server_context(
             lines.append(f"- Версия БД: {rec.version}")
         if rec.dc:
             lines.append(f"- ЦОД: {rec.dc}")
-        # Кластер: ноды с тем же env, dc и префиксом имени
+
+        # Кластер: берём все ноды с тем же (env, dc, prefix) из полного списка страницы
         key = _cluster_key(rec)
-        siblings = [r for r in by_cluster.get(key, []) if r.server != rec.server]
-        if by_cluster.get(key) and len(by_cluster[key]) > 1:
-            node_names = [r.short_name() for r in sorted(by_cluster[key], key=lambda r: r.server)]
-            lines.append(f"- Кластер: да, входит в группу из {len(by_cluster[key])} нод: {', '.join(node_names)}")
-        elif siblings:
-            lines.append(f"- Кластер: в группе с {', '.join(r.short_name() for r in siblings[:5])}")
+        cluster_nodes = by_cluster.get(key, [])
+        if len(cluster_nodes) > 1:
+            # Сортируем, выводим полные короткие имена
+            node_names = sorted(r.short_name() for r in cluster_nodes)
+            other_names = [n for n in node_names if n != short]
+            lines.append(
+                f"- Кластер (replica set): ДА — {len(cluster_nodes)} ноды: "
+                f"{', '.join(node_names)}"
+            )
+            if other_names:
+                lines.append(
+                    f"  Остальные ноды кластера: {', '.join(other_names)}"
+                )
+        else:
+            lines.append("- Кластер: нет данных о других нодах с таким же префиксом")
+
         if rec.memory:
             lines.append(f"- Память: {rec.memory}")
         if rec.cpu:
@@ -239,7 +254,10 @@ def build_server_context(
                 contacts = contacts_by_page.get(pid)
                 if contacts:
                     seen_pages_contacts.add(pid)
-                    lines.append(f"**Ответственные за сервис ({rec.page_title or pid}):** {', '.join(contacts)}")
+                    lines.append(
+                        f"**Ответственные за '{rec.page_title or pid}':** "
+                        f"{', '.join(contacts)}"
+                    )
                     lines.append("")
 
     if len(records) > 8:

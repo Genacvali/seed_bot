@@ -285,17 +285,25 @@ def main() -> None:
                         if unique_records:
                             # Сохраняем в кеш треда для follow-up вопросов
                             _cache_thread_records(thread_id, unique_records)
+
+                            # Загружаем ВСЕ записи со страниц, где нашли сервер —
+                            # чтобы определить полный кластер, а не только найденные ноды
+                            page_ids_found = list({
+                                rec.page_id for rec in unique_records if rec.page_id
+                            })
+                            full_page_records: list = []
                             contacts_by_page: dict[str, list[str]] = {}
-                            for rec in unique_records:
-                                if rec.page_id and rec.page_id not in contacts_by_page:
-                                    try:
-                                        contacts_by_page[rec.page_id] = confluence.get_contacts(rec.page_id)
-                                    except Exception:
-                                        contacts_by_page[rec.page_id] = []
+                            for pid in page_ids_found:
+                                try:
+                                    full_page_records.extend(confluence.parse_servers(pid))
+                                    contacts_by_page[pid] = confluence.get_contacts(pid)
+                                except Exception as e:
+                                    print(f"[confluence] full page load error pid={pid}: {e}", flush=True)
+
                             confluence_ctx = build_server_context(
                                 unique_records,
                                 ", ".join(intent.hostnames),
-                                all_records=unique_records,
+                                all_records=full_page_records or unique_records,
                                 contacts_by_page=contacts_by_page or None,
                             )
                             extra_context = confluence_ctx
