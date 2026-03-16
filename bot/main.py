@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 from html import unescape
 
@@ -29,6 +30,22 @@ from .storage import Storage
 from .webhook_server import start_webhook_server
 
 _MENTION_RE = re.compile(r"@\w+")
+
+# Кеш: thread_id → (list[ServerRecord], timestamp)
+# Хранит последние найденные серверы в треде для поддержки follow-up вопросов
+_THREAD_SERVER_CTX: dict[str, tuple[list, float]] = {}
+_CTX_TTL = 3600.0  # 1 час
+
+
+def _cache_thread_records(thread_id: str, records: list) -> None:
+    _THREAD_SERVER_CTX[thread_id] = (records, time.monotonic())
+
+
+def _get_thread_records(thread_id: str) -> list:
+    entry = _THREAD_SERVER_CTX.get(thread_id)
+    if entry and time.monotonic() - entry[1] < _CTX_TTL:
+        return entry[0]
+    return []
 
 
 def _strip_mentions(text: str) -> str:
@@ -235,7 +252,7 @@ def main() -> None:
                     mm.create_post(ev.channel_id, format_docs_list(pages), root_id=root_id)
                     return
 
-                # 2в. Вопрос о конкретном сервере
+                # 2в. Вопрос о конкретном сервере (явное имя в сообщении)
                 if intent.intent == IntentType.SERVER_LOOKUP and intent.hostnames:
                     page_ids: list[str] = []
                     if storage:
@@ -266,9 +283,20 @@ def main() -> None:
                                 unique_records.append(rec)
 
                         if unique_records:
-                            # Есть данные — инжектируем в LLM как контекст
+                            # Сохраняем в кеш треда для follow-up вопросов
+                            _cache_thread_records(thread_id, unique_records)
+                            contacts_by_page: dict[str, list[str]] = {}
+                            for rec in unique_records:
+                                if rec.page_id and rec.page_id not in contacts_by_page:
+                                    try:
+                                        contacts_by_page[rec.page_id] = confluence.get_contacts(rec.page_id)
+                                    except Exception:
+                                        contacts_by_page[rec.page_id] = []
                             confluence_ctx = build_server_context(
-                                unique_records, ", ".join(intent.hostnames)
+                                unique_records,
+                                ", ".join(intent.hostnames),
+                                all_records=unique_records,
+                                contacts_by_page=contacts_by_page or None,
                             )
                             extra_context = confluence_ctx
                             try:
@@ -280,13 +308,41 @@ def main() -> None:
                             )
                             return
                         elif page_ids:
-                            # Страницы есть, но сервер не найден
+                            # Страниц нет, но сервер не найден
                             mm.create_post(
                                 ev.channel_id,
                                 format_server_not_found(intent.hostnames),
                                 root_id=root_id,
                             )
                             return
+
+                # 2г. Follow-up в треде: нет имени сервера, но в кеше есть контекст
+                # Например: "а он в кластере?" после вопроса о конкретном сервере
+                if intent.intent == IntentType.NONE:
+                    cached = _get_thread_records(thread_id)
+                    if cached and in_thread:
+                        contacts_by_page_cached: dict[str, list[str]] = {}
+                        for rec in cached:
+                            if rec.page_id and rec.page_id not in contacts_by_page_cached:
+                                try:
+                                    contacts_by_page_cached[rec.page_id] = confluence.get_contacts(rec.page_id)
+                                except Exception:
+                                    contacts_by_page_cached[rec.page_id] = []
+                        confluence_ctx = build_server_context(
+                            cached,
+                            cached[0].short_name() if cached else "",
+                            all_records=cached,
+                            contacts_by_page=contacts_by_page_cached or None,
+                        )
+                        extra_context = confluence_ctx
+                        try:
+                            extra_context = confluence_ctx + "\n\n" + km.build_context_prompt(prompt)
+                        except Exception:
+                            pass
+                        post_streaming(
+                            ev.channel_id, root_id, prompt, thread_id, ev.user_id, extra_context
+                        )
+                        return
 
             # ── 3. Проверка: продолжение алерт-треда / resolution ──────
             if correlator.is_alert_thread(thread_id):

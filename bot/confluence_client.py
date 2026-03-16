@@ -26,6 +26,11 @@ import requests
 from bs4 import BeautifulSoup
 
 
+def _short_hostname(fqdn: str) -> str:
+    """p-smi-mng-sc-msk01.sberdevices.ru → p-smi-mng-sc-msk01"""
+    return fqdn.split(".")[0].lower()
+
+
 @dataclass
 class ServerRecord:
     """Одна строка из таблицы серверов."""
@@ -44,10 +49,18 @@ class ServerRecord:
     page_title: str = ""
     page_id: str = ""
 
+    def short_name(self) -> str:
+        """Возвращает короткое имя хоста (без домена)."""
+        return _short_hostname(self.server) if self.server else ""
+
     def to_markdown(self) -> str:
         lines = []
         if self.server:
-            lines.append(f"**Сервер:** `{self.server}`")
+            short = self.short_name()
+            if short and short != self.server.lower():
+                lines.append(f"**Сервер:** `{short}` (`{self.server}`)")
+            else:
+                lines.append(f"**Сервер:** `{self.server}`")
         if self.env:
             lines.append(f"**Среда:** {self.env}")
         if self.ip:
@@ -80,10 +93,13 @@ _COLUMN_MAP: dict[str, str] = {
     "сервер": "server",
     "server": "server",
     "hostname": "server",
+    "host": "server",
     "хост": "server",
     "ip": "ip",
     "ip адрес": "ip",
     "ip-адрес": "ip",
+    "addr": "ip",
+    "address": "ip",
     "ос": "os",
     "os": "os",
     "операционная система": "os",
@@ -92,15 +108,23 @@ _COLUMN_MAP: dict[str, str] = {
     "ram": "memory",
     "cpu": "cpu",
     "процессор": "cpu",
+    "cores": "cpu",
     "version": "version",
+    "versions": "version",
     "версия": "version",
     "ver": "version",
+    "vesion": "version",    # опечатка в таблице — намеренно
+    "verson": "version",    # ещё один вариант опечатки
     "цод": "dc",
     "dc": "dc",
     "дата-центр": "dc",
+    "datacenter": "dc",
+    "data center": "dc",
     "сеть": "network",
     "network": "network",
     "net": "network",
+    "vlan": "network",
+    "cluster": "extra",     # если есть колонка cluster — в extra
 }
 
 
@@ -125,6 +149,8 @@ class ConfluenceClient:
         self._cache: dict[str, list[ServerRecord]] = {}
         # Кеш raw body: page_id -> html string
         self._body_cache: dict[str, str] = {}
+        # Кеш контактов со страницы: page_id -> list[str] (имена)
+        self._contacts_cache: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -175,6 +201,7 @@ class ConfluenceClient:
 
         records = _parse_tables(body, page_title=title, page_id=page_id)
         self._cache[page_id] = records
+        self._contacts_cache[page_id] = _parse_contacts(body)
         return records
 
     def search_servers(
@@ -302,6 +329,12 @@ class ConfluenceClient:
             "  /pages/viewpage.action?pageId=12345"
         )
 
+    def get_contacts(self, page_id: str) -> list[str]:
+        """Возвращает список контактов (имён) со страницы. Кеш заполняется при parse_servers."""
+        if page_id not in self._contacts_cache:
+            self.parse_servers(page_id)
+        return self._contacts_cache.get(page_id, [])
+
     def ping(self) -> bool:
         try:
             r = self._session.get(
@@ -311,6 +344,61 @@ class ConfluenceClient:
             return r.status_code == 200
         except Exception:
             return False
+
+
+# ------------------------------------------------------------------
+# Contacts parser (блок "Контакты" на странице)
+# ------------------------------------------------------------------
+
+def _parse_contacts(html: str) -> list[str]:
+    """
+    Ищет на странице блок "Контакты" / "Contacts" и извлекает список имён.
+    Поддерживает: заголовок + список/таблица/параграфы ниже.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    names: list[str] = []
+    # Confluence: заголовок "Контакты" / "Contacts"
+    contact_heading = soup.find(string=re.compile(r"Контакты?|Contacts?", re.IGNORECASE))
+    if not contact_heading:
+        return names
+    parent = contact_heading.parent
+    if not parent:
+        return names
+    # Ищем следующий контент: ul, table, или соседние p/div
+    for elem in parent.find_next_siblings():
+        tag = elem.name
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            break
+        if tag == "ul":
+            for li in elem.find_all("li"):
+                t = re.sub(r"\s+", " ", li.get_text(separator=" ")).strip()
+                if t and len(t) > 2 and not t.startswith("@"):
+                    names.append(t)
+            for p in elem.find_all("p"):
+                t = re.sub(r"\s+", " ", p.get_text(separator=" ")).strip()
+                if t and len(t) > 2:
+                    names.append(t)
+            break
+        if tag == "table":
+            for cell in elem.find_all(["td", "th"]):
+                t = re.sub(r"\s+", " ", cell.get_text(separator=" ")).strip()
+                if t and len(t) > 4 and t not in ("Контакты", "Contacts", "Имя", "Name"):
+                    names.append(t)
+            break
+        if tag in ("p", "div") or (tag and "body" in tag.lower()):
+            for p in elem.find_all(["p", "li"]):
+                t = re.sub(r"\s+", " ", p.get_text(separator=" ")).strip()
+                if t and len(t) > 2 and not t.startswith("@"):
+                    names.append(t)
+            if not names:
+                t = elem.get_text(separator=" ", strip=True)
+                if t and len(t) > 2:
+                    for part in re.split(r"[,;]|\s+и\s+", t):
+                        part = part.strip()
+                        if part and len(part) > 3 and not part.startswith("@"):
+                            names.append(part)
+            break
+    return list(dict.fromkeys(names))  # deduplicate
 
 
 # ------------------------------------------------------------------
@@ -418,20 +506,31 @@ def _filter_records(records: list[ServerRecord], query: str) -> list[ServerRecor
     if query.lower().startswith("r:"):
         try:
             pat = re.compile(query[2:], re.IGNORECASE)
-            return [r for r in records if pat.search(r.server) or pat.search(r.ip)]
+            return [
+                r for r in records
+                if pat.search(r.server)
+                or pat.search(_short_hostname(r.server))
+                or pat.search(r.ip)
+            ]
         except re.error:
             pass
 
     # Wildcard: содержит * или ?
     if "*" in query or "?" in query:
         pattern = query.lower()
-        return [r for r in records if fnmatch.fnmatch(r.server.lower(), pattern)]
+        return [
+            r for r in records
+            if fnmatch.fnmatch(r.server.lower(), pattern)
+            or fnmatch.fnmatch(_short_hostname(r.server), pattern)
+        ]
 
     # Подстрока (без учёта регистра)
+    # Ищем и по полному FQDN, и по короткому имени
     q = query.lower()
     return [
         r for r in records
         if q in r.server.lower()
+        or q in _short_hostname(r.server)
         or q in r.ip.lower()
         or q in r.env.lower()
         or q in r.dc.lower()

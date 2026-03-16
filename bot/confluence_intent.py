@@ -44,11 +44,10 @@ _DOCS_LIST_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Типичные имена хостов (минимум одно тире → инфра-хостнейм)
-# Например: p-ihubcs-mng-adv-msk12, db-prod-01, t-core-pg-02
-# Первый сегмент может быть 1 символ (p-, t-, d- — префиксы prod/test/dev)
+# Типичные имена хостов — поддерживает короткие и FQDN
+# Примеры: p-smi-mng-sc-msk01, p-smi-mng-sc-msk01.sberdevices.ru, db-prod-01
 _HOSTNAME_RE = re.compile(
-    r"\b([a-z][a-z0-9]{0,20}(?:-[a-z0-9]{1,20}){1,8})\b",
+    r"\b([a-z][a-z0-9]{0,20}(?:-[a-z0-9]{1,20}){1,8}(?:\.[a-z][a-z0-9\-.]{2,50})?)\b",
     re.IGNORECASE,
 )
 
@@ -100,18 +99,23 @@ def find_confluence_urls(text: str) -> list[str]:
 
 
 def extract_hostnames(text: str) -> list[str]:
-    """Извлекает потенциальные хостнеймы из текста (минимум 1 дефис)."""
+    """
+    Извлекает потенциальные хостнеймы из текста.
+    Поддерживает FQDN: p-smi-mng-sc-msk01.sberdevices.ru → возвращает 'p-smi-mng-sc-msk01'.
+    Требует минимум один дефис (признак инфра-хостнейма).
+    """
     found = []
     for m in _HOSTNAME_RE.finditer(text):
         name = m.group(1).lower()
-        if name in _HOSTNAME_STOPWORDS:
+        # Если это FQDN — берём только первую часть (до точки)
+        short = name.split(".")[0]
+        if short in _HOSTNAME_STOPWORDS:
             continue
-        if "-" not in name:
+        if "-" not in short:
             continue
-        # Отсеиваем слишком короткие и слишком длинные
-        if len(name) < 5 or len(name) > 60:
+        if len(short) < 5 or len(short) > 63:
             continue
-        found.append(name)
+        found.append(short)
     return list(dict.fromkeys(found))  # deduplicate, preserve order
 
 
@@ -157,17 +161,44 @@ def format_indexed_page(title: str, page_id: str, url: str, is_new: bool) -> str
     )
 
 
-def build_server_context(records: "list[ServerRecord]", query: str) -> str:
+def _cluster_base(short_hostname: str) -> str:
+    """p-smi-mng-sc-msk01 → p-smi-mng-sc (база для группировки кластера)."""
+    parts = short_hostname.split("-")
+    if len(parts) <= 1:
+        return short_hostname
+    return "-".join(parts[:-1])
+
+
+def _cluster_key(rec: "ServerRecord") -> tuple[str, str, str]:
+    return (rec.env or "", rec.dc or "", _cluster_base(rec.short_name()))
+
+
+def build_server_context(
+    records: "list[ServerRecord]",
+    query: str,
+    all_records: "list[ServerRecord] | None" = None,
+    contacts_by_page: "dict[str, list[str]] | None" = None,
+) -> str:
     """
     Формирует текстовый контекст из записей ServerRecord для инжекции в LLM.
+    all_records — все найденные записи (для определения кластера); если None, используется records.
+    contacts_by_page — page_id -> список имён контактов со страницы.
     """
     if not records:
         return ""
 
+    pool = all_records if all_records is not None else records
+    by_cluster: dict[tuple[str, str, str], list["ServerRecord"]] = {}
+    for rec in pool:
+        key = _cluster_key(rec)
+        by_cluster.setdefault(key, []).append(rec)
+
     lines = [
-        f"## Данные из документации Confluence по запросу «{query}»\n"
+        f"## Данные из документации Confluence по запросу «{query}»\n",
+        "Используй эти данные для ответа. Если в одной среде и ЦОД несколько нод с общим префиксом имени — это кластер (replica set). Контакты — ответственные за сервис.\n",
     ]
-    for rec in records[:5]:  # не перегружаем контекст
+    seen_pages_contacts: set[str] = set()
+    for rec in records[:8]:
         lines.append(f"### {rec.server}")
         if rec.env:
             lines.append(f"- Среда: {rec.env}")
@@ -179,6 +210,14 @@ def build_server_context(records: "list[ServerRecord]", query: str) -> str:
             lines.append(f"- Версия БД: {rec.version}")
         if rec.dc:
             lines.append(f"- ЦОД: {rec.dc}")
+        # Кластер: ноды с тем же env, dc и префиксом имени
+        key = _cluster_key(rec)
+        siblings = [r for r in by_cluster.get(key, []) if r.server != rec.server]
+        if by_cluster.get(key) and len(by_cluster[key]) > 1:
+            node_names = [r.short_name() for r in sorted(by_cluster[key], key=lambda r: r.server)]
+            lines.append(f"- Кластер: да, входит в группу из {len(by_cluster[key])} нод: {', '.join(node_names)}")
+        elif siblings:
+            lines.append(f"- Кластер: в группе с {', '.join(r.short_name() for r in siblings[:5])}")
         if rec.memory:
             lines.append(f"- Память: {rec.memory}")
         if rec.cpu:
@@ -193,7 +232,17 @@ def build_server_context(records: "list[ServerRecord]", query: str) -> str:
             lines.append(f"- Источник: {rec.page_title}")
         lines.append("")
 
-    if len(records) > 5:
-        lines.append(f"_(и ещё {len(records) - 5} записей)_")
+    if contacts_by_page:
+        for rec in records[:8]:
+            pid = rec.page_id
+            if pid and pid not in seen_pages_contacts:
+                contacts = contacts_by_page.get(pid)
+                if contacts:
+                    seen_pages_contacts.add(pid)
+                    lines.append(f"**Ответственные за сервис ({rec.page_title or pid}):** {', '.join(contacts)}")
+                    lines.append("")
+
+    if len(records) > 8:
+        lines.append(f"_(и ещё {len(records) - 8} записей)_")
 
     return "\n".join(lines)
