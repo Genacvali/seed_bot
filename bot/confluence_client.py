@@ -48,6 +48,7 @@ class ServerRecord:
     # источник
     page_title: str = ""
     page_id: str = ""
+    page_url: str = ""
 
     def short_name(self) -> str:
         """Возвращает короткое имя хоста (без домена)."""
@@ -199,7 +200,8 @@ class ConfluenceClient:
         body = page.get("body", {}).get("storage", {}).get("value", "")
         self._body_cache[page_id] = body
 
-        records = _parse_tables(body, page_title=title, page_id=page_id)
+        page_url = f"{self._base}/pages/viewpage.action?pageId={page_id}"
+        records = _parse_tables(body, page_title=title, page_id=page_id, page_url=page_url)
         self._cache[page_id] = records
         self._contacts_cache[page_id] = _parse_contacts(body)
         return records
@@ -405,13 +407,15 @@ def _parse_contacts(html: str) -> list[str]:
 # HTML table parser
 # ------------------------------------------------------------------
 
-def _parse_tables(html: str, page_title: str = "", page_id: str = "") -> list[ServerRecord]:
+def _parse_tables(
+    html: str, page_title: str = "", page_id: str = "", page_url: str = ""
+) -> list[ServerRecord]:
     """Парсит все таблицы из Confluence Storage Format HTML."""
     soup = BeautifulSoup(html, "html.parser")
     records: list[ServerRecord] = []
 
     for table in soup.find_all("table"):
-        table_records = _parse_single_table(table, page_title, page_id)
+        table_records = _parse_single_table(table, page_title, page_id, page_url)
         records.extend(table_records)
 
     return records
@@ -421,6 +425,7 @@ def _parse_single_table(
     table: Any,
     page_title: str,
     page_id: str,
+    page_url: str = "",
 ) -> list[ServerRecord]:
     rows = table.find_all("tr")
     if not rows:
@@ -460,7 +465,7 @@ def _parse_single_table(
         if not any(v.strip() for v in values):
             continue
 
-        rec = ServerRecord(page_title=page_title, page_id=page_id)
+        rec = ServerRecord(page_title=page_title, page_id=page_id, page_url=page_url)
 
         for i, val in enumerate(values):
             field_name = col_map.get(i)

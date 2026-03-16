@@ -50,7 +50,13 @@ class Storage:
             raise RuntimeError("MONGO_URI is not set")
         self._client: MongoClient[Any] = MongoClient(cfg.mongo_uri)
         self._db: Database[Any] = self._client[cfg.mongo_db]
-        self._ensure_indexes()
+        # Сначала проверяем связь; исключение здесь → Storage недоступен
+        self._client.admin.command("ping")
+        # Индексы создаём с защитой — ошибка индекса не должна убивать бота
+        try:
+            self._ensure_indexes()
+        except Exception as e:
+            print(f"[storage] index init warning (non-fatal): {e}", flush=True)
 
     # ------------------------------------------------------------------
     # Index bootstrap

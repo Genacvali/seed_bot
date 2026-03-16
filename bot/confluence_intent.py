@@ -231,7 +231,6 @@ def build_server_context(
         "Пиши `p-smi-mng-sc-msk01`, а НЕ «msk01» или «первый».",
         "",
     ]
-    seen_pages_contacts: set[str] = set()
     for rec in records[:8]:
         short = rec.short_name()
         lines.append(f"### {short}  ({rec.server})")
@@ -274,31 +273,19 @@ def build_server_context(
             for k, v in rec.extra.items():
                 if v:
                     lines.append(f"- {k}: {v}")
-        if rec.page_title:
+        # Ответственные: выводим если найдены, иначе — не упоминаем
+        if contacts_by_page is not None:
+            contacts = contacts_by_page.get(rec.page_id or "", [])
+            if contacts:
+                lines.append(f"- Ответственные: {', '.join(contacts)}")
+
+        # Ссылка на страницу документации
+        if rec.page_url:
+            title_label = rec.page_title or rec.page_id or "документация"
+            lines.append(f"- Документация: [{title_label}]({rec.page_url})")
+        elif rec.page_title:
             lines.append(f"- Источник: {rec.page_title}")
         lines.append("")
-
-    # Контакты: явно указываем есть / нет — чтобы LLM не выдумывал
-    checked_pages: set[str] = set()
-    for rec in records[:8]:
-        pid = rec.page_id
-        if not pid or pid in checked_pages:
-            continue
-        checked_pages.add(pid)
-        if contacts_by_page is not None:
-            contacts = contacts_by_page.get(pid)
-            if contacts:
-                seen_pages_contacts.add(pid)
-                lines.append(
-                    f"**Ответственные за '{rec.page_title or pid}':** "
-                    f"{', '.join(contacts)}"
-                )
-            else:
-                lines.append(
-                    f"**Ответственные за '{rec.page_title or pid}':** "
-                    f"не указаны в документации — НЕ ВЫДУМЫВАЙ имена"
-                )
-            lines.append("")
 
     if len(records) > 8:
         lines.append(f"_(и ещё {len(records) - 8} записей)_")

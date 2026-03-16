@@ -61,13 +61,9 @@ def main() -> None:
     if cfg.mongo_uri:
         try:
             storage = Storage(cfg)
-            if storage.ping():
-                print(f"[storage] MongoDB connected: {cfg.mongo_db}", flush=True)
-            else:
-                print("[storage] MongoDB ping failed, running without storage", flush=True)
-                storage = None
+            print(f"[storage] MongoDB connected: {cfg.mongo_db}", flush=True)
         except Exception as e:
-            print(f"[storage] MongoDB init failed: {e}", flush=True)
+            print(f"[storage] MongoDB unavailable, running without storage: {e}", flush=True)
             storage = None
     else:
         print("[storage] MONGO_URI not set, running without persistent storage", flush=True)
@@ -461,7 +457,7 @@ def main() -> None:
         f"[bot] ready | {scope} | reply_all={cfg.reply_all} | "
         f"streaming={cfg.gigachat_streaming} | "
         f"rate={cfg.gigachat_rate_limit}/min | "
-        f"knowledge={'mongo' if storage else 'memory'} | "
+        f"storage={'mongo:' + cfg.mongo_db if storage else 'none'} | "
         f"confluence={'on' if confluence else 'off'} | "
         f"webhook={':{cfg.webhook_port}' if cfg.webhook_port else 'off'}",
         flush=True,
