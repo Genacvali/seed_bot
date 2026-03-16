@@ -51,7 +51,6 @@ HELP_TEXT = """\
 _CMD_RE = re.compile(
     r"(?:^|\s)(?:find|найди|поищи)\s+(.+)",
     re.IGNORECASE,
-    re.IGNORECASE,
 )
 
 
