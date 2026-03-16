@@ -290,4 +290,9 @@ def build_server_context(
     if len(records) > 8:
         lines.append(f"_(и ещё {len(records) - 8} записей)_")
 
+    # Напоминание: в ответе вывести ссылку из строк «Документация:» выше
+    if any(getattr(r, "page_url", None) for r in records[:8]):
+        lines.append("")
+        lines.append("В конце ответа обязательно выведи ссылку: Подробнее: [название](url) — скопируй из строки «Документация:» выше.")
+
     return "\n".join(lines)
