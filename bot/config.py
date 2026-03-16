@@ -67,6 +67,15 @@ class Config:
     digest_channel_id: str | None
     digest_time: str            # "HH:MM" UTC
 
+    # Confluence
+    confluence_url: str | None
+    confluence_token: str | None
+    confluence_user: str | None
+    confluence_password: str | None
+    confluence_verify_tls: bool
+    # page IDs для поиска серверов (comma-separated)
+    confluence_server_pages: list[str]
+
 
 def load_config() -> Config:
     mattermost_url = _req("MATTERMOST_URL").rstrip("/")
@@ -102,6 +111,14 @@ def load_config() -> Config:
     digest_channel_id = os.getenv("DIGEST_CHANNEL_ID")
     digest_time = os.getenv("DIGEST_TIME", "09:00")
 
+    confluence_url = os.getenv("CONFLUENCE_URL")
+    confluence_token = os.getenv("CONFLUENCE_TOKEN")
+    confluence_user = os.getenv("CONFLUENCE_USER")
+    confluence_password = os.getenv("CONFLUENCE_PASSWORD")
+    confluence_verify_tls = _bool("CONFLUENCE_VERIFY_TLS", True)
+    _pages_raw = os.getenv("CONFLUENCE_SERVER_PAGES", "")
+    confluence_server_pages = [p.strip() for p in _pages_raw.split(",") if p.strip()]
+
     if not ((gigachat_client_id and gigachat_client_secret) or gigachat_auth_key):
         raise RuntimeError(
             "GigaChat credentials missing: set GIGACHAT_CLIENT_ID+GIGACHAT_CLIENT_SECRET "
@@ -133,4 +150,10 @@ def load_config() -> Config:
         webhook_secret=webhook_secret,
         digest_channel_id=digest_channel_id,
         digest_time=digest_time,
+        confluence_url=confluence_url,
+        confluence_token=confluence_token,
+        confluence_user=confluence_user,
+        confluence_password=confluence_password,
+        confluence_verify_tls=confluence_verify_tls,
+        confluence_server_pages=confluence_server_pages,
     )

@@ -1,0 +1,365 @@
+"""
+Confluence REST API клиент.
+
+Умеет:
+- Получать страницу по ID или title+spaceKey
+- Парсить таблицы из storage-формата (HTML/XML)
+- Искать серверы по точному имени или маске (wildcard/regex)
+- Возвращать структурированные данные о сервере
+
+Пример таблицы Confluence (MongoDB Documentation):
+
+| Среда | Сервер | IP | ОС | Память | CPU | Version | ЦОД | Сеть |
+|-------|--------|----|----|--------|-----|---------|-----|------|
+| ПРОД  | p-xx-mng-xx | 10.x.x.x | SberLinux 8 | 16GB | 4 | 6.0.20 | SK | iAz |
+"""
+from __future__ import annotations
+
+import fnmatch
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import requests
+from bs4 import BeautifulSoup
+
+
+@dataclass
+class ServerRecord:
+    """Одна строка из таблицы серверов."""
+    env: str = ""
+    server: str = ""
+    ip: str = ""
+    os: str = ""
+    memory: str = ""
+    cpu: str = ""
+    version: str = ""
+    dc: str = ""
+    network: str = ""
+    # оригинальные заголовки колонок и значения (для неизвестных полей)
+    extra: dict[str, str] = field(default_factory=dict)
+    # источник
+    page_title: str = ""
+    page_id: str = ""
+
+    def to_markdown(self) -> str:
+        lines = []
+        if self.server:
+            lines.append(f"**Сервер:** `{self.server}`")
+        if self.env:
+            lines.append(f"**Среда:** {self.env}")
+        if self.ip:
+            lines.append(f"**IP:** `{self.ip}`")
+        if self.os:
+            lines.append(f"**ОС:** {self.os}")
+        if self.memory:
+            lines.append(f"**Память:** {self.memory}")
+        if self.cpu:
+            lines.append(f"**CPU:** {self.cpu}")
+        if self.version:
+            lines.append(f"**Версия:** {self.version}")
+        if self.dc:
+            lines.append(f"**ЦОД:** {self.dc}")
+        if self.network:
+            lines.append(f"**Сеть:** {self.network}")
+        for k, v in self.extra.items():
+            if v:
+                lines.append(f"**{k}:** {v}")
+        if self.page_title:
+            lines.append(f"*Источник: {self.page_title}*")
+        return "\n".join(lines)
+
+
+# Маппинг заголовков колонок (рус/анг → поле ServerRecord)
+_COLUMN_MAP: dict[str, str] = {
+    "среда": "env",
+    "environment": "env",
+    "env": "env",
+    "сервер": "server",
+    "server": "server",
+    "hostname": "server",
+    "хост": "server",
+    "ip": "ip",
+    "ip адрес": "ip",
+    "ip-адрес": "ip",
+    "ос": "os",
+    "os": "os",
+    "операционная система": "os",
+    "память": "memory",
+    "memory": "memory",
+    "ram": "memory",
+    "cpu": "cpu",
+    "процессор": "cpu",
+    "version": "version",
+    "версия": "version",
+    "ver": "version",
+    "цод": "dc",
+    "dc": "dc",
+    "дата-центр": "dc",
+    "сеть": "network",
+    "network": "network",
+    "net": "network",
+}
+
+
+class ConfluenceClient:
+    def __init__(
+        self,
+        url: str,
+        token: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        verify_tls: bool = True,
+    ) -> None:
+        self._base = url.rstrip("/")
+        self._session = requests.Session()
+        self._session.verify = verify_tls
+        if token:
+            self._session.headers["Authorization"] = f"Bearer {token}"
+        elif username and password:
+            self._session.auth = (username, password)
+
+        # Кеш: page_id -> list[ServerRecord]
+        self._cache: dict[str, list[ServerRecord]] = {}
+        # Кеш raw body: page_id -> html string
+        self._body_cache: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_page(self, page_id: str, force_refresh: bool = False) -> dict[str, Any]:
+        """Возвращает сырой JSON страницы с body.storage и version."""
+        r = self._session.get(
+            f"{self._base}/rest/api/content/{page_id}",
+            params={"expand": "body.storage,version,title"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_page_by_title(self, space_key: str, title: str) -> dict[str, Any] | None:
+        r = self._session.get(
+            f"{self._base}/rest/api/content",
+            params={"spaceKey": space_key, "title": title, "expand": "version"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        return results[0] if results else None
+
+    def get_child_pages(self, page_id: str) -> list[dict[str, Any]]:
+        """Возвращает дочерние страницы."""
+        r = self._session.get(
+            f"{self._base}/rest/api/content/{page_id}/child/page",
+            params={"limit": 50, "expand": "version"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json().get("results", [])
+
+    def parse_servers(self, page_id: str, force_refresh: bool = False) -> list[ServerRecord]:
+        """
+        Загружает страницу и парсит все таблицы на ней.
+        Возвращает список ServerRecord. Кеширует результат.
+        """
+        if not force_refresh and page_id in self._cache:
+            return self._cache[page_id]
+
+        page = self.get_page(page_id)
+        title = page.get("title", "")
+        body = page.get("body", {}).get("storage", {}).get("value", "")
+        self._body_cache[page_id] = body
+
+        records = _parse_tables(body, page_title=title, page_id=page_id)
+        self._cache[page_id] = records
+        return records
+
+    def search_servers(
+        self,
+        page_id: str,
+        query: str,
+        force_refresh: bool = False,
+    ) -> list[ServerRecord]:
+        """
+        Ищет серверы по маске или подстроке.
+
+        Поддерживает:
+        - Точное совпадение: `p-ihubcs-mng-adv-msk12`
+        - Подстрока: `mng-adv`
+        - Wildcard: `p-ihubcs-mng-*`
+        - Regex: `r:p-.*-mng-.*`  (префикс r:)
+        """
+        records = self.parse_servers(page_id, force_refresh=force_refresh)
+        return _filter_records(records, query)
+
+    def search_all_children(
+        self,
+        parent_page_id: str,
+        query: str,
+    ) -> list[ServerRecord]:
+        """
+        Ищет по всем дочерним страницам + самой родительской.
+        Полезно когда каждый кластер — отдельная дочерняя страница.
+        """
+        results: list[ServerRecord] = []
+
+        # Сама родительская
+        try:
+            results.extend(self.search_servers(parent_page_id, query))
+        except Exception as e:
+            print(f"[confluence] parent page error: {e}", flush=True)
+
+        # Дочерние
+        try:
+            children = self.get_child_pages(parent_page_id)
+        except Exception as e:
+            print(f"[confluence] get_child_pages error: {e}", flush=True)
+            return results
+
+        for child in children:
+            child_id = child.get("id")
+            if not child_id:
+                continue
+            try:
+                found = self.search_servers(child_id, query)
+                results.extend(found)
+            except Exception as e:
+                print(f"[confluence] child {child_id} error: {e}", flush=True)
+
+        return results
+
+    def ping(self) -> bool:
+        try:
+            r = self._session.get(
+                f"{self._base}/rest/api/user/current",
+                timeout=10,
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
+
+# ------------------------------------------------------------------
+# HTML table parser
+# ------------------------------------------------------------------
+
+def _parse_tables(html: str, page_title: str = "", page_id: str = "") -> list[ServerRecord]:
+    """Парсит все таблицы из Confluence Storage Format HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    records: list[ServerRecord] = []
+
+    for table in soup.find_all("table"):
+        table_records = _parse_single_table(table, page_title, page_id)
+        records.extend(table_records)
+
+    return records
+
+
+def _parse_single_table(
+    table: Any,
+    page_title: str,
+    page_id: str,
+) -> list[ServerRecord]:
+    rows = table.find_all("tr")
+    if not rows:
+        return []
+
+    # Находим заголовки (первая строка с <th> или первая строка)
+    header_row = None
+    data_start = 0
+    for i, row in enumerate(rows):
+        if row.find("th"):
+            header_row = row
+            data_start = i + 1
+            break
+
+    if header_row is None:
+        # Попробуем первую строку как заголовок
+        header_row = rows[0]
+        data_start = 1
+
+    headers = [_cell_text(th) for th in header_row.find_all(["th", "td"])]
+    if not headers or not any(_normalize_header(h) in _COLUMN_MAP for h in headers):
+        # Таблица не похожа на таблицу серверов
+        return []
+
+    col_map = {i: _COLUMN_MAP.get(_normalize_header(h), h) for i, h in enumerate(headers)}
+    records: list[ServerRecord] = []
+    current_env = ""
+
+    for row in rows[data_start:]:
+        cells = row.find_all(["td", "th"])
+        if not cells:
+            continue
+
+        values = [_cell_text(c) for c in cells]
+
+        # Пропускаем пустые строки
+        if not any(v.strip() for v in values):
+            continue
+
+        rec = ServerRecord(page_title=page_title, page_id=page_id)
+
+        for i, val in enumerate(values):
+            field_name = col_map.get(i)
+            if not field_name:
+                continue
+            if field_name == "env":
+                if val.strip():
+                    current_env = val.strip()
+                rec.env = current_env
+            elif hasattr(rec, field_name):
+                setattr(rec, field_name, val.strip())
+            else:
+                rec.extra[headers[i] if i < len(headers) else f"col{i}"] = val.strip()
+
+        # Если env не было явно — используем накопленное
+        if not rec.env:
+            rec.env = current_env
+
+        # Пропускаем строки без сервера
+        if rec.server:
+            records.append(rec)
+
+    return records
+
+
+def _cell_text(cell: Any) -> str:
+    """Извлекает чистый текст из ячейки, убирает лишние пробелы."""
+    return re.sub(r"\s+", " ", cell.get_text(separator=" ")).strip()
+
+
+def _normalize_header(h: str) -> str:
+    return h.lower().strip()
+
+
+# ------------------------------------------------------------------
+# Search / filter
+# ------------------------------------------------------------------
+
+def _filter_records(records: list[ServerRecord], query: str) -> list[ServerRecord]:
+    query = query.strip()
+
+    # Режим regex: r:паттерн
+    if query.lower().startswith("r:"):
+        try:
+            pat = re.compile(query[2:], re.IGNORECASE)
+            return [r for r in records if pat.search(r.server) or pat.search(r.ip)]
+        except re.error:
+            pass
+
+    # Wildcard: содержит * или ?
+    if "*" in query or "?" in query:
+        pattern = query.lower()
+        return [r for r in records if fnmatch.fnmatch(r.server.lower(), pattern)]
+
+    # Подстрока (без учёта регистра)
+    q = query.lower()
+    return [
+        r for r in records
+        if q in r.server.lower()
+        or q in r.ip.lower()
+        or q in r.env.lower()
+        or q in r.dc.lower()
+    ]

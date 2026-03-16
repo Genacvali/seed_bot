@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from .alerts import AlertCorrelator, parse_alert_server
 from .commands import CommandResult, handle as handle_command
 from .config import load_config
+from .confluence_client import ConfluenceClient
 from .gigachat import GigaChatClient
 from .knowledge import KnowledgeManager
 from .mattermost import MattermostClient, PostEvent, ReactionEvent
@@ -45,6 +46,28 @@ def main() -> None:
             storage = None
     else:
         print("[storage] MONGO_URI not set, running without persistent storage", flush=True)
+
+    # ── Confluence ─────────────────────────────────────────────────────
+    confluence: ConfluenceClient | None = None
+    if cfg.confluence_url and (cfg.confluence_token or (cfg.confluence_user and cfg.confluence_password)):
+        try:
+            confluence = ConfluenceClient(
+                url=cfg.confluence_url,
+                token=cfg.confluence_token,
+                username=cfg.confluence_user,
+                password=cfg.confluence_password,
+                verify_tls=cfg.confluence_verify_tls,
+            )
+            # Прикрепляем список page_id для команды server
+            confluence._cfg_pages = cfg.confluence_server_pages  # type: ignore[attr-defined]
+            print(
+                f"[confluence] enabled: {cfg.confluence_url} | pages={cfg.confluence_server_pages}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[confluence] init failed: {e}", flush=True)
+    else:
+        print("[confluence] not configured (CONFLUENCE_URL / CONFLUENCE_TOKEN missing)", flush=True)
 
     # ── Core services ─────────────────────────────────────────────────
     mm = MattermostClient(cfg)
@@ -141,6 +164,7 @@ def main() -> None:
                 gc=gc,
                 storage=storage,
                 bot_username=cfg.mattermost_bot_username,
+                confluence=confluence,
             )
             if cmd_result is not None:
                 post = mm.create_post(ev.channel_id, cmd_result.text, root_id=root_id)
@@ -248,6 +272,7 @@ def main() -> None:
         f"streaming={cfg.gigachat_streaming} | "
         f"rate={cfg.gigachat_rate_limit}/min | "
         f"knowledge={'mongo' if storage else 'memory'} | "
+        f"confluence={'on' if confluence else 'off'} | "
         f"webhook={':{cfg.webhook_port}' if cfg.webhook_port else 'off'}",
         flush=True,
     )

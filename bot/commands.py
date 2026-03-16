@@ -8,7 +8,8 @@
   @seed oncall            — кто сейчас дежурит
   @seed stats             — топ алертов
   @seed save              — сохранить тред как known issue
-  @seed forget            — забыть факт (TODO)
+  @seed server <mask>     — поиск сервера в Confluence
+  @seed server info <hostname> — полная информация о сервере
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .confluence_client import ConfluenceClient
     from .gigachat import GigaChatClient
     from .mattermost import MattermostClient, PostEvent
     from .storage import Storage
@@ -28,6 +30,7 @@ HELP_TEXT = """\
 | Команда | Что делает |
 |---------|-----------|
 | `@seed help` | Это сообщение |
+| `@seed server <маска>` | Поиск сервера в Confluence (`*`, `?`, `r:regex`) |
 | `@seed find <запрос>` | Поиск по базе знаний |
 | `@seed tl;dr` | Резюме текущего треда |
 | `@seed oncall` | Кто сейчас дежурит |
@@ -61,6 +64,7 @@ def handle(
     gc: "GigaChatClient",
     storage: "Storage | None",
     bot_username: str,
+    confluence: "ConfluenceClient | None" = None,
 ) -> CommandResult | None:
     """
     Возвращает CommandResult если команда найдена, иначе None.
@@ -95,7 +99,36 @@ def handle(
     if p in ("save", "сохранить", "записать", "save issue"):
         return _cmd_save(ev, mm, gc, storage)
 
+    # server — поиск в Confluence
+    if p.startswith(("server ", "сервер ")):
+        query = clean_prompt.strip().split(None, 1)[1].strip() if " " in clean_prompt.strip() else ""
+        return _cmd_server(query, confluence, gc)
+
+    # Естественный запрос о сервере через Confluence
+    if confluence and _is_server_query(p):
+        query = _extract_server_query(clean_prompt)
+        if query:
+            return _cmd_server(query, confluence, gc)
+
     return None
+
+
+_SERVER_QUERY_PATTERNS = re.compile(
+    r"(?:расскажи|инфо|информация|что знаешь|покажи|найди|где|на каком|кластер|"
+    r"tell me about|info about|show|find|which cluster|environment|env)\s+"
+    r"(?:про\s+|о\s+|об\s+|сервер[еа]?\s+|по\s+)?([a-z0-9][a-z0-9\-_.]+)",
+    re.IGNORECASE,
+)
+
+
+def _is_server_query(prompt: str) -> bool:
+    """Грубая эвристика: содержит ли запрос имя сервера/маску?"""
+    return bool(_SERVER_QUERY_PATTERNS.search(prompt))
+
+
+def _extract_server_query(prompt: str) -> str:
+    m = _SERVER_QUERY_PATTERNS.search(prompt)
+    return m.group(1) if m else ""
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +281,78 @@ def _cmd_save(
         f"Сохранил как known issue ✅\n\n{summary_text}",
         react_ok=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# server — поиск в Confluence
+# ---------------------------------------------------------------------------
+
+_MAX_RESULTS = 10  # не заспамить чат
+
+
+def _cmd_server(
+    query: str,
+    confluence: "ConfluenceClient | None",
+    gc: "GigaChatClient",
+) -> CommandResult:
+    if not confluence:
+        return CommandResult(
+            "Confluence не подключён. Добавь в `.env`:\n"
+            "```\nCONFLUENCE_URL=https://confluence.example.com\n"
+            "CONFLUENCE_TOKEN=...\nCONFLUENCE_SERVER_PAGES=277910996\n```"
+        )
+    if not query:
+        return CommandResult(
+            "Укажи маску: `@seed server p-*-mng-*` или `@seed server db-prod-01`"
+        )
+
+    from .confluence_client import ConfluenceClient as _CC  # noqa: F401
+
+    # Поиск по всем настроенным страницам
+    all_records = []
+    for page_id in confluence._cfg_pages:
+        try:
+            found = confluence.search_all_children(page_id, query)
+            all_records.extend(found)
+        except Exception as e:
+            print(f"[confluence] search error page={page_id}: {e}", flush=True)
+
+    if not all_records:
+        return CommandResult(
+            f"По маске `{query}` ничего не нашёл в Confluence.\n"
+            "Попробуй другую маску или `r:regex`."
+        )
+
+    # Дедупликация по server
+    seen: set[str] = set()
+    unique = []
+    for r in all_records:
+        key = r.server.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    total = len(unique)
+    shown = unique[:_MAX_RESULTS]
+
+    if total == 1:
+        # Один результат — полная карточка
+        return CommandResult(shown[0].to_markdown())
+
+    # Несколько — таблица + LLM-комментарий
+    lines = [f"Нашёл **{total}** сервер(ов) по `{query}`:\n"]
+    lines.append("| Сервер | Среда | IP | Версия | ЦОД |")
+    lines.append("|--------|-------|-----|--------|-----|")
+    for rec in shown:
+        lines.append(
+            f"| `{rec.server}` | {rec.env} | {rec.ip} | {rec.version} | {rec.dc} |"
+        )
+    if total > _MAX_RESULTS:
+        lines.append(f"\n_…и ещё {total - _MAX_RESULTS}. Уточни маску._")
+
+    # Если точный хит — добавить полную карточку
+    exact = [r for r in shown if r.server.lower() == query.lower()]
+    if exact:
+        lines.append(f"\n---\n**Точное совпадение:**\n{exact[0].to_markdown()}")
+
+    return CommandResult("\n".join(lines))
