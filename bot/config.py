@@ -52,8 +52,8 @@ class Config:
     gigachat_rate_limit: int   # max requests per minute
     gigachat_streaming: bool   # stream response via SSE
 
-    # Mattermost WS TLS verify
-    mattermost_ws_verify_tls: bool
+    # Mattermost TLS verify (REST + WebSocket)
+    mattermost_verify_tls: bool
 
     # MongoDB
     mongo_uri: str | None
@@ -99,7 +99,17 @@ def load_config() -> Config:
     gigachat_rate_limit = _int("GIGACHAT_RATE_LIMIT", 20)
     gigachat_streaming = _bool("GIGACHAT_STREAMING", True)
 
-    mattermost_ws_verify_tls = _bool("MATTERMOST_WS_VERIFY_TLS", True)
+    # MATTERMOST_VERIFY_TLS покрывает и REST, и WS
+    # Для обратной совместимости — смотрим оба варианта, WS-вариант как fallback
+    _mm_tls_new = os.getenv("MATTERMOST_VERIFY_TLS")
+    _mm_tls_old = os.getenv("MATTERMOST_WS_VERIFY_TLS")
+    mattermost_verify_tls = _bool(
+        "MATTERMOST_VERIFY_TLS",
+        _bool("MATTERMOST_WS_VERIFY_TLS", True),
+    )
+    if _mm_tls_new is None and _mm_tls_old is not None:
+        # Используем старое значение если новое не задано
+        mattermost_verify_tls = _mm_tls_old.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     mongo_uri = os.getenv("MONGO_URI")
     mongo_db = os.getenv("MONGO_DB", "seed_bot")
@@ -143,7 +153,7 @@ def load_config() -> Config:
         gigachat_verify_tls=gigachat_verify_tls,
         gigachat_rate_limit=gigachat_rate_limit,
         gigachat_streaming=gigachat_streaming,
-        mattermost_ws_verify_tls=mattermost_ws_verify_tls,
+        mattermost_verify_tls=mattermost_verify_tls,
         mongo_uri=mongo_uri,
         mongo_db=mongo_db,
         webhook_port=webhook_port,

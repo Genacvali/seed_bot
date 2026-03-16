@@ -35,6 +35,10 @@ class MattermostClient:
         self._base = cfg.mattermost_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {cfg.mattermost_token}"})
+        self._session.verify = cfg.mattermost_verify_tls
+        if not cfg.mattermost_verify_tls:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._on_reaction: Callable[[ReactionEvent], None] | None = None
 
     def _api(self, path: str) -> str:
@@ -155,7 +159,7 @@ class MattermostClient:
         return "wss://" + self._base.lstrip("/") + "/api/v4/websocket"
 
     def _sslopt(self) -> dict[str, Any] | None:
-        if not self._cfg.mattermost_ws_verify_tls and self.ws_url().startswith("wss://"):
+        if not self._cfg.mattermost_verify_tls and self.ws_url().startswith("wss://"):
             return {"cert_reqs": ssl.CERT_NONE}
         return None
 
