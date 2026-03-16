@@ -125,6 +125,11 @@ class Storage:
         db.facts.create_index("created_by")
         db.facts.create_index("created_at")
 
+        # 17. confluence_pages — страницы Confluence для поиска серверов
+        db.confluence_pages.create_index("page_id", unique=True)
+        db.confluence_pages.create_index("space_key")
+        db.confluence_pages.create_index("added_by")
+
     # ------------------------------------------------------------------
     # 1. Dialog history
     # ------------------------------------------------------------------
@@ -319,6 +324,52 @@ class Storage:
             {"$set": {"emoji": emoji, "created_at": _now()}},
             upsert=True,
         )
+
+    # ------------------------------------------------------------------
+    # 17. Confluence pages registry
+    # ------------------------------------------------------------------
+
+    def add_confluence_page(
+        self,
+        page_id: str,
+        title: str,
+        space_key: str,
+        url: str,
+        added_by: str,
+    ) -> bool:
+        """Добавляет страницу в реестр. Возвращает True если новая, False если уже была."""
+        result = self._db.confluence_pages.update_one(
+            {"page_id": page_id},
+            {
+                "$set": {
+                    "title": title,
+                    "space_key": space_key,
+                    "url": url,
+                    "added_by": added_by,
+                    "updated_at": _now(),
+                },
+                "$setOnInsert": {"added_at": _now()},
+            },
+            upsert=True,
+        )
+        return result.upserted_id is not None
+
+    def list_confluence_pages(self) -> list[dict[str, Any]]:
+        return list(
+            self._db.confluence_pages.find(
+                {}, {"_id": 0, "page_id": 1, "title": 1, "space_key": 1, "url": 1, "added_by": 1}
+            ).sort("added_at", ASCENDING)
+        )
+
+    def remove_confluence_page(self, page_id: str) -> bool:
+        result = self._db.confluence_pages.delete_one({"page_id": page_id})
+        return result.deleted_count > 0
+
+    def get_confluence_page_ids(self) -> list[str]:
+        return [
+            d["page_id"]
+            for d in self._db.confluence_pages.find({}, {"page_id": 1, "_id": 0})
+        ]
 
     # ------------------------------------------------------------------
     # Daily digest

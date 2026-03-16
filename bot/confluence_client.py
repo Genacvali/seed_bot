@@ -3,6 +3,7 @@ Confluence REST API клиент.
 
 Умеет:
 - Получать страницу по ID или title+spaceKey
+- Резолвить URL страницы в page_id (display/SPACE/Title, viewpage.action?pageId=...)
 - Парсить таблицы из storage-формата (HTML/XML)
 - Искать серверы по точному имени или маске (wildcard/regex)
 - Возвращать структурированные данные о сервере
@@ -19,6 +20,7 @@ import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -228,6 +230,77 @@ class ConfluenceClient:
                 print(f"[confluence] child {child_id} error: {e}", flush=True)
 
         return results
+
+    def resolve_page_url(self, url: str) -> dict[str, str]:
+        """
+        Принимает любую ссылку на страницу Confluence и возвращает
+        {"page_id": "...", "title": "...", "space_key": "...", "url": "..."}
+
+        Поддерживает форматы:
+          https://conf.example.com/display/SPACE/Page+Title
+          https://conf.example.com/pages/viewpage.action?pageId=12345
+          https://conf.example.com/wiki/display/SPACE/Title
+          https://conf.example.com/wiki/spaces/SPACE/pages/12345
+        """
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+
+        page_id: str | None = None
+        space_key: str | None = None
+        title_slug: str | None = None
+
+        # Вариант 1: ?pageId=12345
+        if "pageId" in qs:
+            page_id = qs["pageId"][0]
+
+        # Вариант 2: /display/SPACE/Title  или  /wiki/display/SPACE/Title
+        if not page_id:
+            m = re.search(r"/display/([^/]+)/([^?#]+)", parsed.path)
+            if m:
+                space_key = m.group(1)
+                title_slug = m.group(2).replace("+", " ").replace("%20", " ")
+
+        # Вариант 3: /wiki/spaces/SPACE/pages/12345
+        if not page_id:
+            m = re.search(r"/spaces/([^/]+)/pages/(\d+)", parsed.path)
+            if m:
+                space_key = m.group(1)
+                page_id = m.group(2)
+
+        # Вариант 4: просто число в path — /pages/12345
+        if not page_id:
+            m = re.search(r"/pages/(\d+)", parsed.path)
+            if m:
+                page_id = m.group(1)
+
+        if page_id:
+            page = self.get_page(page_id)
+            return {
+                "page_id": page_id,
+                "title": page.get("title", ""),
+                "space_key": page.get("space", {}).get("key", space_key or ""),
+                "url": url,
+            }
+
+        if space_key and title_slug:
+            page = self.get_page_by_title(space_key, title_slug)
+            if not page:
+                raise ValueError(
+                    f"Страница '{title_slug}' не найдена в пространстве '{space_key}'"
+                )
+            return {
+                "page_id": page["id"],
+                "title": page.get("title", title_slug),
+                "space_key": space_key,
+                "url": url,
+            }
+
+        raise ValueError(
+            f"Не удалось разобрать URL Confluence: {url!r}\n"
+            "Ожидаемые форматы:\n"
+            "  /display/SPACE/PageTitle\n"
+            "  /pages/viewpage.action?pageId=12345"
+        )
 
     def ping(self) -> bool:
         try:

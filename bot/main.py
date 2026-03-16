@@ -12,6 +12,14 @@ from .alerts import AlertCorrelator, parse_alert_server
 from .commands import CommandResult, handle as handle_command
 from .config import load_config
 from .confluence_client import ConfluenceClient
+from .confluence_intent import (
+    IntentType,
+    build_server_context,
+    detect as detect_confluence_intent,
+    format_docs_list,
+    format_indexed_page,
+    format_server_not_found,
+)
 from .gigachat import GigaChatClient
 from .knowledge import KnowledgeManager
 from .mattermost import MattermostClient, PostEvent, ReactionEvent
@@ -58,10 +66,15 @@ def main() -> None:
                 password=cfg.confluence_password,
                 verify_tls=cfg.confluence_verify_tls,
             )
-            # Прикрепляем список page_id для команды server
+            # Fallback: страницы из .env (если MongoDB нет или пуста)
             confluence._cfg_pages = cfg.confluence_server_pages  # type: ignore[attr-defined]
+
+            # Считаем сколько страниц в MongoDB
+            mongo_pages = storage.get_confluence_page_ids() if storage else []
+            total_pages = len(mongo_pages) or len(cfg.confluence_server_pages)
             print(
-                f"[confluence] enabled: {cfg.confluence_url} | pages={cfg.confluence_server_pages}",
+                f"[confluence] enabled: {cfg.confluence_url} | "
+                f"pages in db={len(mongo_pages)} | fallback config={len(cfg.confluence_server_pages)}",
                 flush=True,
             )
         except Exception as e:
@@ -172,25 +185,126 @@ def main() -> None:
                     mm.add_reaction(post["id"], "white_check_mark")
                 return
 
-            # ── 2. Проверка: продолжение алерт-треда / resolution ──────
+            # ── 2. Confluence: естественный язык ──────────────────────
+            if confluence:
+                intent = detect_confluence_intent(prompt)
+
+                # 2а. Пользователь скинул ссылку на Confluence
+                if intent.intent == IntentType.CONFLUENCE_URL and intent.urls:
+                    for url in intent.urls:
+                        try:
+                            info = confluence.resolve_page_url(url)
+                            is_new = True
+                            if storage:
+                                is_new = storage.add_confluence_page(
+                                    page_id=info["page_id"],
+                                    title=info["title"],
+                                    space_key=info["space_key"],
+                                    url=url,
+                                    added_by=ev.user_id,
+                                )
+                            else:
+                                # fallback: в памяти
+                                pages = getattr(confluence, "_cfg_pages", [])
+                                if info["page_id"] not in pages:
+                                    pages.append(info["page_id"])
+                                    confluence._cfg_pages = pages  # type: ignore[attr-defined]
+                                else:
+                                    is_new = False
+                            reply = format_indexed_page(
+                                info["title"], info["page_id"], url, is_new
+                            )
+                            mm.add_reaction(ev.post_id, "white_check_mark")
+                        except Exception as e:
+                            reply = f"Не смог проиндексировать страницу: `{e}`"
+                        mm.create_post(ev.channel_id, reply, root_id=root_id)
+                    return
+
+                # 2б. «Какие у тебя документации?»
+                if intent.intent == IntentType.DOCS_LIST:
+                    if storage:
+                        try:
+                            pages = storage.list_confluence_pages()
+                        except Exception:
+                            pages = []
+                    else:
+                        pages = [
+                            {"page_id": pid, "title": pid, "space_key": "", "url": ""}
+                            for pid in getattr(confluence, "_cfg_pages", [])
+                        ]
+                    mm.create_post(ev.channel_id, format_docs_list(pages), root_id=root_id)
+                    return
+
+                # 2в. Вопрос о конкретном сервере
+                if intent.intent == IntentType.SERVER_LOOKUP and intent.hostnames:
+                    page_ids: list[str] = []
+                    if storage:
+                        try:
+                            page_ids = storage.get_confluence_page_ids()
+                        except Exception:
+                            pass
+                    if not page_ids:
+                        page_ids = getattr(confluence, "_cfg_pages", [])
+
+                    if page_ids:
+                        all_records = []
+                        for hostname in intent.hostnames:
+                            for page_id in page_ids:
+                                try:
+                                    found = confluence.search_all_children(page_id, hostname)
+                                    all_records.extend(found)
+                                except Exception as e:
+                                    print(f"[confluence] search error: {e}", flush=True)
+
+                        # Дедупликация
+                        seen: set[str] = set()
+                        unique_records = []
+                        for rec in all_records:
+                            key = rec.server.lower()
+                            if key not in seen:
+                                seen.add(key)
+                                unique_records.append(rec)
+
+                        if unique_records:
+                            # Есть данные — инжектируем в LLM как контекст
+                            confluence_ctx = build_server_context(
+                                unique_records, ", ".join(intent.hostnames)
+                            )
+                            extra_context = confluence_ctx
+                            try:
+                                extra_context = confluence_ctx + "\n\n" + km.build_context_prompt(prompt)
+                            except Exception:
+                                pass
+                            post_streaming(
+                                ev.channel_id, root_id, prompt, thread_id, ev.user_id, extra_context
+                            )
+                            return
+                        elif page_ids:
+                            # Страницы есть, но сервер не найден
+                            mm.create_post(
+                                ev.channel_id,
+                                format_server_not_found(intent.hostnames),
+                                root_id=root_id,
+                            )
+                            return
+
+            # ── 3. Проверка: продолжение алерт-треда / resolution ──────
             if correlator.is_alert_thread(thread_id):
                 if correlator.check_resolution(thread_id, prompt):
-                    ask = mm.create_post(
+                    mm.create_post(
                         ev.channel_id,
                         "Проблему решили? Сохранить как known issue? (`@seed save` чтобы записать)",
                         root_id=root_id,
                     )
                     return
 
-            # ── 3. Классификация LLM: факт / алерт / вопрос ────────────
+            # ── 4. Классификация LLM: факт / алерт / вопрос ────────────
             km_response = km.process(prompt, ev.user_id)
 
             if km_response is not None:
-                # Факт → ставим ✅ реакцию на исходный пост
                 mm.add_reaction(ev.post_id, "white_check_mark")
                 mm.create_post(ev.channel_id, km_response, root_id=root_id)
 
-                # Если это был алерт — добавляем корреляцию и помечаем тред
                 if km._last_msg_type == "alert":
                     server, atype = parse_alert_server(prompt)
                     corr = correlator.record(server, atype)
@@ -201,7 +315,7 @@ def main() -> None:
                         mm.create_post(ev.channel_id, corr.note, root_id=root_id)
                 return
 
-            # ── 4. Обычный чат с контекстом из базы знаний ────────────
+            # ── 5. Обычный чат с контекстом из базы знаний ────────────
             extra_context = ""
             try:
                 extra_context = km.build_context_prompt(prompt)
