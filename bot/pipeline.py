@@ -31,9 +31,10 @@ def _get_embedder(cfg: Config):
     return GigaChat(cfg)
 
 
-def run_rag(cfg: Config, query: str) -> str:
+def run_rag(cfg: Config, query: str, history: list[dict] | None = None) -> str:
     """
     Один проход RAG: эмбеддинг запроса -> поиск в Qdrant -> загрузка docs/cases из MongoDB -> ответ GigaChat.
+    history: список {"role": "user"|"assistant", "content": "..."} — предыдущие сообщения треда.
     """
     embedder = _get_embedder(cfg)
     gigachat = GigaChat(cfg)
@@ -61,4 +62,4 @@ def run_rag(cfg: Config, query: str) -> str:
         docs, cases = mongo.get_by_ids(payloads)
         context = _format_context(docs, cases)
 
-    return gigachat.chat(query, context)
+    return gigachat.chat(query, context, history=history or [])

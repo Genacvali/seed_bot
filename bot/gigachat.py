@@ -109,13 +109,13 @@ class GigaChat:
             print(f"[gigachat] embed error: {e}", flush=True)
             return []
 
-    def chat(self, user_message: str, context: str) -> str:
-        """Ответ GigaChat с контекстом (RAG)."""
+    def chat(self, user_message: str, context: str, history: list[dict] | None = None) -> str:
+        """Ответ GigaChat с контекстом (RAG) и историей диалога."""
         system = f"{SYSTEM_PROMPT}\n\n## Контекст:\n{context}" if context else SYSTEM_PROMPT
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_message},
-        ]
+        messages = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
         body = {
             "model": self._cfg.gigachat_model,
             "messages": messages,

@@ -54,21 +54,23 @@ def main() -> None:
     mongo = MongoClient(cfg.mongo_uri)
     db = mongo[cfg.mongo_db]
 
-    for name in ("docs", "cases"):
+    for name in ("docs", "cases", "conversations"):
         if name not in db.list_collection_names():
             db.create_collection(name)
             print(f"  Создана коллекция: {name}")
         else:
             print(f"  Коллекция уже есть: {name}")
 
-    try:
-        db.docs.create_index([("created_at", ASCENDING)], name="created_at")
-    except Exception:
-        pass
-    try:
-        db.cases.create_index([("created_at", ASCENDING)], name="created_at")
-    except Exception:
-        pass
+    for col, idx, fields in [
+        ("docs",          "created_at",   [("created_at", ASCENDING)]),
+        ("cases",         "created_at",   [("created_at", ASCENDING)]),
+        ("conversations", "user_history", [("user_id", ASCENDING), ("created_at", -1)]),
+        ("conversations", "thread_order", [("thread_id", ASCENDING), ("created_at", ASCENDING)]),
+    ]:
+        try:
+            db[col].create_index(fields, name=idx)
+        except Exception:
+            pass
 
     # ─── Qdrant: размерность вектора и коллекция ──────────────────────
     print("\n[Qdrant] Подключение...")
