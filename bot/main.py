@@ -18,6 +18,8 @@ from .confluence_intent import (
     build_server_context,
     detect as detect_confluence_intent,
     format_docs_list,
+    format_docs_topic_found,
+    format_docs_topic_not_found,
     format_indexed_page,
     format_server_not_found,
 )
@@ -353,6 +355,44 @@ def main() -> None:
                             for pid in getattr(confluence, "_cfg_pages", [])
                         ]
                     mm.create_post(ev.channel_id, format_docs_list(pages), root_id=root_id)
+                    return
+
+                # 2б2. «Есть ли у тебя документация по X?»
+                if intent.intent == IntentType.DOCS_TOPIC_SEARCH:
+                    kw = intent.topic_keyword
+                    all_pages: list[dict] = []
+                    if storage:
+                        try:
+                            all_pages = storage.list_confluence_pages()
+                        except Exception:
+                            all_pages = []
+                    else:
+                        all_pages = [
+                            {"page_id": pid, "title": pid, "space_key": "", "url": ""}
+                            for pid in getattr(confluence, "_cfg_pages", [])
+                        ]
+
+                    matched: list[dict] = []
+                    if kw and all_pages:
+                        kw_lower = kw.lower()
+                        matched = [
+                            p for p in all_pages
+                            if kw_lower in (p.get("title") or "").lower()
+                            or kw_lower in (p.get("space_key") or "").lower()
+                        ]
+
+                    if matched:
+                        mm.create_post(
+                            ev.channel_id,
+                            format_docs_topic_found(matched, kw),
+                            root_id=root_id,
+                        )
+                    else:
+                        mm.create_post(
+                            ev.channel_id,
+                            format_docs_topic_not_found(kw),
+                            root_id=root_id,
+                        )
                     return
 
                 # 2в. Вопрос о конкретном сервере (явное имя в сообщении)

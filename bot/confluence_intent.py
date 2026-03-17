@@ -33,7 +33,7 @@ _CONFLUENCE_URL_RE = re.compile(
 # Markdown-ссылка: [текст](url) или [url](url)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
 
-# Запросы о доступных документациях
+# Запросы о доступных документациях (общий список)
 _DOCS_LIST_RE = re.compile(
     r"(?:"
     r"какие.{0,20}(?:документаци|доки|страниц|базы|источник)|"
@@ -41,10 +41,28 @@ _DOCS_LIST_RE = re.compile(
     r"(?:покажи|список|перечисли).{0,25}(?:документаци|страниц|источник|базы|доков|документов)|"
     r"(?:документаци|доки|страниц).{0,20}(?:есть|добавлен|подключен|в базе)|"
     r"какую.{0,20}документаци|"
-    r"есть ли.{0,20}документаци|"
     r"what.{0,15}(?:docs|documentation|pages|sources)|"
     r"list.{0,15}(?:docs|pages|sources)"
     r")",
+    re.IGNORECASE,
+)
+
+# Вопрос «есть ли у тебя документация / доки по X?»
+# Примеры: "у тебя есть документация по монге?", "есть ли доки по mongodb?",
+#          "а дай ссылку на доки", "есть документация по postgres?"
+_DOCS_TOPIC_RE = re.compile(
+    r"(?:"
+    r"(?:у\s+тебя|у\s+вас)\s+есть\s+(?:документаци|доки|страниц)|"
+    r"есть\s+(?:ли\s+)?(?:у\s+тебя\s+)?(?:документаци|доки)|"
+    r"(?:есть|имеется)\s+(?:документаци|доки)|"
+    r"(?:дай|скинь|дайте).{0,15}(?:ссылку|доки|документаци).{0,15}(?:на|по|про)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Извлечение ключевого слова темы: "по монге" → "монге", "про mongodb" → "mongodb"
+_DOCS_TOPIC_KW_RE = re.compile(
+    r"(?:по|про|для|о\b|об\b|на)\s+([а-яёa-z][а-яёa-z0-9\-_]{1,40})",
     re.IGNORECASE,
 )
 
@@ -69,6 +87,7 @@ _HOSTNAME_STOPWORDS = {
 class IntentType(str, Enum):
     CONFLUENCE_URL   = "confluence_url"    # сообщение содержит ссылку
     DOCS_LIST        = "docs_list"         # «какие доки есть?»
+    DOCS_TOPIC_SEARCH = "docs_topic_search"  # «есть ли у тебя документация по X?»
     SERVER_LOOKUP    = "server_lookup"     # вопрос о конкретном сервере
     NONE             = "none"
 
@@ -80,6 +99,8 @@ class ConfluenceIntent:
     urls: list[str] | None = None
     # для SERVER_LOOKUP
     hostnames: list[str] | None = None
+    # для DOCS_TOPIC_SEARCH — ключевое слово темы (может быть None если не извлечено)
+    topic_keyword: str | None = None
 
 
 def detect(message: str) -> ConfluenceIntent:
@@ -90,6 +111,11 @@ def detect(message: str) -> ConfluenceIntent:
 
     if _DOCS_LIST_RE.search(message):
         return ConfluenceIntent(intent=IntentType.DOCS_LIST)
+
+    if _DOCS_TOPIC_RE.search(message):
+        kw_match = _DOCS_TOPIC_KW_RE.search(message)
+        kw = kw_match.group(1).lower() if kw_match else None
+        return ConfluenceIntent(intent=IntentType.DOCS_TOPIC_SEARCH, topic_keyword=kw)
 
     hostnames = extract_hostnames(message)
     if hostnames:
@@ -187,8 +213,32 @@ def format_indexed_page(title: str, page_id: str, url: str, is_new: bool) -> str
             f"Проиндексировал 📄 **{title}** (`{page_id}`).\n"
             f"Теперь могу искать по этой документации — просто спрашивай про серверы."
         )
+    link = f"[{title}]({url})" if url else f"**{title}**"
+    return f"Страница {link} уже у меня в базе."
+
+
+def format_docs_topic_found(pages: list[dict[str, Any]], keyword: str | None) -> str:
+    """Ответ когда нашли страницы по ключевому слову."""
+    topic = f" по «{keyword}»" if keyword else ""
+    lines = [f"Нашёл в базе документацию{topic}:\n"]
+    for p in pages:
+        title = p.get("title", "—")
+        url = p.get("url", "")
+        space = p.get("space_key", "")
+        if url:
+            lines.append(f"- [{title}]({url})" + (f" ({space})" if space else ""))
+        else:
+            lines.append(f"- **{title}**" + (f" ({space})" if space else ""))
+    return "\n".join(lines)
+
+
+def format_docs_topic_not_found(keyword: str | None) -> str:
+    """Ответ когда по ключевому слову ничего не нашли."""
+    topic = f" по «{keyword}»" if keyword else ""
     return (
-        f"Страница **{title}** уже была у меня. Обновил данные."
+        f"Не нашёл в своей базе документацию{topic}.\n"
+        "Скинь ссылку — проиндексирую, например:\n"
+        f"> @seed вот документация https://confluence.example.com/display/SPACE/Page"
     )
 
 
