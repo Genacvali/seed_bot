@@ -1,7 +1,8 @@
+"""Конфигурация бота: Mattermost, GigaChat, MongoDB, Qdrant."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -38,43 +39,27 @@ class Config:
     mattermost_team: str | None
     mattermost_channel: str | None
     mattermost_channel_id: str | None
-
+    mattermost_verify_tls: bool
     reply_all: bool
     mention_required: bool
 
-    # GigaChat
+    # GigaChat (OAuth для embeddings + chat)
     gigachat_client_id: str | None
     gigachat_client_secret: str | None
     gigachat_auth_key: str | None
     gigachat_scope: str
     gigachat_model: str
     gigachat_verify_tls: bool
-    gigachat_rate_limit: int   # max requests per minute
-    gigachat_streaming: bool   # stream response via SSE
+    gigachat_embeddings_model: str
 
-    # Mattermost TLS verify (REST + WebSocket)
-    mattermost_verify_tls: bool
-
-    # MongoDB
-    mongo_uri: str | None
+    # MongoDB (docs + cases)
+    mongo_uri: str
     mongo_db: str
 
-    # Webhook server
-    webhook_port: int | None   # None = disabled
-    webhook_secret: str | None
-
-    # Daily digest
-    digest_channel_id: str | None
-    digest_time: str            # "HH:MM" UTC
-
-    # Confluence
-    confluence_url: str | None
-    confluence_token: str | None
-    confluence_user: str | None
-    confluence_password: str | None
-    confluence_verify_tls: bool
-    # page IDs для поиска серверов (comma-separated)
-    confluence_server_pages: list[str]
+    # Qdrant (векторный поиск)
+    qdrant_url: str
+    qdrant_collection: str
+    qdrant_limit: int
 
 
 def load_config() -> Config:
@@ -82,11 +67,10 @@ def load_config() -> Config:
     mattermost_token = _req("MATTERMOST_TOKEN")
     mattermost_bot_user_id = _req("MATTERMOST_BOT_USER_ID")
     mattermost_bot_username = os.getenv("MATTERMOST_BOT_USERNAME", "seed")
-
     mattermost_team = os.getenv("MATTERMOST_TEAM")
     mattermost_channel = os.getenv("MATTERMOST_CHANNEL")
     mattermost_channel_id = os.getenv("MATTERMOST_CHANNEL_ID")
-
+    mattermost_verify_tls = _bool("MATTERMOST_VERIFY_TLS", True)
     reply_all = _bool("REPLY_ALL", False)
     mention_required = _bool("MENTION_REQUIRED", True)
 
@@ -96,43 +80,18 @@ def load_config() -> Config:
     gigachat_scope = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
     gigachat_model = os.getenv("GIGACHAT_MODEL", "GigaChat")
     gigachat_verify_tls = _bool("GIGACHAT_VERIFY_TLS", True)
-    gigachat_rate_limit = _int("GIGACHAT_RATE_LIMIT", 20)
-    gigachat_streaming = _bool("GIGACHAT_STREAMING", True)
+    gigachat_embeddings_model = os.getenv("GIGACHAT_EMBEDDINGS_MODEL", "Embeddings")
 
-    # MATTERMOST_VERIFY_TLS покрывает и REST, и WS
-    # Для обратной совместимости — смотрим оба варианта, WS-вариант как fallback
-    _mm_tls_new = os.getenv("MATTERMOST_VERIFY_TLS")
-    _mm_tls_old = os.getenv("MATTERMOST_WS_VERIFY_TLS")
-    mattermost_verify_tls = _bool(
-        "MATTERMOST_VERIFY_TLS",
-        _bool("MATTERMOST_WS_VERIFY_TLS", True),
-    )
-    if _mm_tls_new is None and _mm_tls_old is not None:
-        # Используем старое значение если новое не задано
-        mattermost_verify_tls = _mm_tls_old.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-    mongo_uri = os.getenv("MONGO_URI")
+    mongo_uri = _req("MONGO_URI")
     mongo_db = os.getenv("MONGO_DB", "seed_bot")
 
-    webhook_port_raw = os.getenv("WEBHOOK_PORT")
-    webhook_port = int(webhook_port_raw) if webhook_port_raw else None
-    webhook_secret = os.getenv("WEBHOOK_SECRET")
-
-    digest_channel_id = os.getenv("DIGEST_CHANNEL_ID")
-    digest_time = os.getenv("DIGEST_TIME", "09:00")
-
-    confluence_url = os.getenv("CONFLUENCE_URL")
-    confluence_token = os.getenv("CONFLUENCE_TOKEN")
-    confluence_user = os.getenv("CONFLUENCE_USER")
-    confluence_password = os.getenv("CONFLUENCE_PASSWORD")
-    confluence_verify_tls = _bool("CONFLUENCE_VERIFY_TLS", True)
-    _pages_raw = os.getenv("CONFLUENCE_SERVER_PAGES", "")
-    confluence_server_pages = [p.strip() for p in _pages_raw.split(",") if p.strip()]
+    qdrant_url = _req("QDRANT_URL").rstrip("/")
+    qdrant_collection = os.getenv("QDRANT_COLLECTION", "knowledge")
+    qdrant_limit = _int("QDRANT_LIMIT", 5)
 
     if not ((gigachat_client_id and gigachat_client_secret) or gigachat_auth_key):
         raise RuntimeError(
-            "GigaChat credentials missing: set GIGACHAT_CLIENT_ID+GIGACHAT_CLIENT_SECRET "
-            "or GIGACHAT_AUTH_KEY"
+            "GigaChat: set GIGACHAT_CLIENT_ID+GIGACHAT_CLIENT_SECRET or GIGACHAT_AUTH_KEY"
         )
 
     return Config(
@@ -143,6 +102,7 @@ def load_config() -> Config:
         mattermost_team=mattermost_team,
         mattermost_channel=mattermost_channel,
         mattermost_channel_id=mattermost_channel_id,
+        mattermost_verify_tls=mattermost_verify_tls,
         reply_all=reply_all,
         mention_required=mention_required,
         gigachat_client_id=gigachat_client_id,
@@ -151,19 +111,10 @@ def load_config() -> Config:
         gigachat_scope=gigachat_scope,
         gigachat_model=gigachat_model,
         gigachat_verify_tls=gigachat_verify_tls,
-        gigachat_rate_limit=gigachat_rate_limit,
-        gigachat_streaming=gigachat_streaming,
-        mattermost_verify_tls=mattermost_verify_tls,
+        gigachat_embeddings_model=gigachat_embeddings_model,
         mongo_uri=mongo_uri,
         mongo_db=mongo_db,
-        webhook_port=webhook_port,
-        webhook_secret=webhook_secret,
-        digest_channel_id=digest_channel_id,
-        digest_time=digest_time,
-        confluence_url=confluence_url,
-        confluence_token=confluence_token,
-        confluence_user=confluence_user,
-        confluence_password=confluence_password,
-        confluence_verify_tls=confluence_verify_tls,
-        confluence_server_pages=confluence_server_pages,
+        qdrant_url=qdrant_url,
+        qdrant_collection=qdrant_collection,
+        qdrant_limit=qdrant_limit,
     )

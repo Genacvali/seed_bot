@@ -1,10 +1,16 @@
-# Mattermost AI bot (GigaChat)
+# RAG-бот для Mattermost (GigaChat + Qdrant + MongoDB)
 
-Бот слушает новые сообщения в Mattermost и отвечает с помощью GigaChat.
+Бот отвечает на сообщения в Mattermost, используя RAG: запрос эмбеддится (GigaChat Embeddings), по вектору ищется в Qdrant, по id подгружаются документы/кейсы из MongoDB, ответ генерирует GigaChat.
+
+## Схема
+
+```
+Mattermost/чат → Python bot → GigaChat Embeddings → Qdrant search → MongoDB docs/cases → GigaChat answer
+```
 
 ## Быстрый старт
 
-1) Установите Python 3.10+ и зависимости:
+1. Установка зависимостей:
 
 ```bash
 python3 -m venv .venv
@@ -12,44 +18,50 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-2) Создайте файл `.env` по примеру:
+2. Настройка `.env` (см. `.env.example`):
+
+- **Mattermost**: `MATTERMOST_URL`, `MATTERMOST_TOKEN`, `MATTERMOST_BOT_USER_ID`
+- **GigaChat**: `GIGACHAT_CLIENT_ID` + `GIGACHAT_CLIENT_SECRET` (или `GIGACHAT_AUTH_KEY`)
+- **MongoDB**: `MONGO_URI`, `MONGO_DB` — коллекции `docs` и `cases`
+- **Qdrant**: `QDRANT_URL`, `QDRANT_COLLECTION` (по умолчанию `knowledge`)
+
+3. Создание коллекций в MongoDB и Qdrant + индексация (один скрипт):
 
 ```bash
-cp .env.example .env
+python scripts/setup_rag.py
 ```
 
-3) Запустите:
+Скрипт создаёт коллекции `docs` и `cases` в MongoDB, коллекцию в Qdrant с нужной размерностью вектора и при наличии данных в MongoDB индексирует их в Qdrant. Подробнее: [docs/SETUP_QUICK.md](docs/SETUP_QUICK.md).
+
+4. Запуск бота:
 
 ```bash
-python3 -m bot
+python -m bot
 ```
+
+## Схемы данных
+
+Подробно: [docs/SCHEMA.md](docs/SCHEMA.md).
+
+- **MongoDB**: коллекции `docs` (title, content) и `cases` (title, description, solution). По `_id` из payload Qdrant подгружаются полные объекты.
+- **Qdrant**: коллекция с векторами (размерность = размерность эмбеддингов GigaChat). Payload: `type` ("doc" | "case"), `doc_id` или `case_id` (строка `str(MongoDB _id)`).
 
 ## Переменные окружения
 
-### Mattermost
+| Переменная | Описание |
+|------------|----------|
+| MATTERMOST_URL | URL сервера Mattermost |
+| MATTERMOST_TOKEN | Токен бота |
+| MATTERMOST_BOT_USER_ID | user_id бота |
+| GIGACHAT_CLIENT_ID, GIGACHAT_CLIENT_SECRET | OAuth GigaChat (или GIGACHAT_AUTH_KEY) |
+| GIGACHAT_MODEL | Модель для ответов (по умолчанию GigaChat) |
+| GIGACHAT_EMBEDDINGS_MODEL | Модель эмбеддингов (по умолчанию Embeddings) |
+| MONGO_URI, MONGO_DB | MongoDB для docs/cases |
+| QDRANT_URL | URL Qdrant (например http://localhost:6333) |
+| QDRANT_COLLECTION | Имя коллекции (по умолчанию knowledge) |
+| QDRANT_LIMIT | Сколько документов подтягивать (по умолчанию 5) |
 
-- `MATTERMOST_URL` — например `https://mm.example.com`
-- `MATTERMOST_TOKEN` — токен бота (Personal Access Token)
-- `MATTERMOST_BOT_USER_ID` — user_id бота (чтобы не отвечать самому себе)
-- (опционально) `MATTERMOST_TEAM` / `MATTERMOST_CHANNEL` или `MATTERMOST_CHANNEL_ID` — чтобы слушать только один канал. Если не заданы — бот слушает все доступные каналы.
+## Использование
 
-### GigaChat
-
-Вариант A (рекомендуется): client id/secret
-- `GIGACHAT_CLIENT_ID`
-- `GIGACHAT_CLIENT_SECRET`
-- `GIGACHAT_SCOPE` (по умолчанию `GIGACHAT_API_PERS`)
-
-Вариант B: готовый ключ для Basic (если вам так выдали)
-- `GIGACHAT_AUTH_KEY` — строка после `Basic ` (base64)
-
-Дополнительно:
-- `GIGACHAT_MODEL` (по умолчанию `GigaChat`)
-- `GIGACHAT_VERIFY_TLS` (`true/false`, по умолчанию `true`)
-- `MATTERMOST_WS_VERIFY_TLS` (`true/false`, по умолчанию `true`) — проверка TLS при WebSocket-подключении к Mattermost
-
-## Как пользоваться
-
-- Бот отвечает, когда его упоминают (`@botname`) или если включить режим `REPLY_ALL=true`.
-- Ответы отправляются в тред исходного сообщения (если возможно).
-
+- В канале/треде напишите сообщение с упоминанием бота (`@botname`) или включите `REPLY_ALL=true`.
+- Бот эмбеддит запрос, ищет ближайшие точки в Qdrant, подгружает тексты из MongoDB и формирует ответ через GigaChat по этому контексту.
