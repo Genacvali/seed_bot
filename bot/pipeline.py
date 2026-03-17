@@ -56,12 +56,9 @@ def run_rag(cfg: Config, query: str) -> str:
             )
         raise
 
-    if not payloads:
-        return "По запросу ничего не найдено в базе. Попробуй переформулировать или добавь документы."
-
-    docs, cases = mongo.get_by_ids(payloads)
-    context = _format_context(docs, cases)
-    if not context.strip():
-        return "Найдены ссылки, но не удалось загрузить тексты из базы."
+    context = ""
+    if payloads:
+        docs, cases = mongo.get_by_ids(payloads)
+        context = _format_context(docs, cases)
 
     return gigachat.chat(query, context)
