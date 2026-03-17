@@ -44,7 +44,18 @@ def run_rag(cfg: Config, query: str) -> str:
     if not vectors or not vectors[0]:
         return "Не удалось получить эмбеддинг запроса."
 
-    payloads = qdrant.search(vectors[0], limit=cfg.qdrant_limit)
+    try:
+        payloads = qdrant.search(vectors[0], limit=cfg.qdrant_limit)
+    except Exception as e:
+        err_text = str(e)
+        if "dimension" in err_text.lower() or "expected dim" in err_text:
+            return (
+                "Несовпадение размерности векторов с коллекцией Qdrant: текущая модель даёт другую размерность, "
+                "чем при создании коллекции. Пересоздай коллекцию и переиндексируй: "
+                "`python scripts/setup_rag.py --recreate`"
+            )
+        raise
+
     if not payloads:
         return "По запросу ничего не найдено в базе. Попробуй переформулировать или добавь документы."
 

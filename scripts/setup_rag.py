@@ -43,6 +43,7 @@ from bot.gigachat import GigaChat
 def main() -> None:
     ap = argparse.ArgumentParser(description="Setup MongoDB + Qdrant for RAG bot")
     ap.add_argument("--only-create", action="store_true", help="Только создать коллекции, не индексировать")
+    ap.add_argument("--recreate", action="store_true", help="Удалить коллекцию Qdrant и создать заново (при смене размерности эмбеддингов)")
     args = ap.parse_args()
 
     print("Загрузка конфига...")
@@ -90,12 +91,16 @@ def main() -> None:
         vector_size = len(test_vectors[0])
         print(f"  Размерность вектора GigaChat: {vector_size}")
 
+    if args.recreate and qdrant.collection_exists(collection):
+        qdrant.delete_collection(collection)
+        print(f"  Удалена коллекция: {collection}")
+
     if not qdrant.collection_exists(collection):
         qdrant.create_collection(
             collection,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
-        print(f"  Создана коллекция: {collection}")
+        print(f"  Создана коллекция: {collection} (size={vector_size})")
     else:
         print(f"  Коллекция уже есть: {collection}")
 
