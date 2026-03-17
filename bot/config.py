@@ -58,6 +58,7 @@ class Config:
 
     # Qdrant (векторный поиск)
     qdrant_url: str
+    qdrant_api_key: str | None
     qdrant_collection: str
     qdrant_limit: int
 
@@ -86,6 +87,7 @@ def load_config() -> Config:
     mongo_db = os.getenv("MONGO_DB", "seed_bot")
 
     qdrant_url = _req("QDRANT_URL").rstrip("/")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
     qdrant_collection = os.getenv("QDRANT_COLLECTION", "knowledge")
     qdrant_limit = _int("QDRANT_LIMIT", 5)
 
@@ -115,6 +117,7 @@ def load_config() -> Config:
         mongo_uri=mongo_uri,
         mongo_db=mongo_db,
         qdrant_url=qdrant_url,
+        qdrant_api_key=qdrant_api_key,
         qdrant_collection=qdrant_collection,
         qdrant_limit=qdrant_limit,
     )

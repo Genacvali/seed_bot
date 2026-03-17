@@ -14,7 +14,10 @@ from .config import Config
 
 class QdrantStore:
     def __init__(self, cfg: Config) -> None:
-        self._client = QdrantClient(url=cfg.qdrant_url)
+        kwargs: dict = {"url": cfg.qdrant_url}
+        if cfg.qdrant_api_key:
+            kwargs["api_key"] = cfg.qdrant_api_key
+        self._client = QdrantClient(**kwargs)
         self._collection = cfg.qdrant_collection
         self._limit = cfg.qdrant_limit
 

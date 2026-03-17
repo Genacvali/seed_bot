@@ -2,14 +2,20 @@
 """
 Один скрипт настройки RAG: создаёт коллекции в MongoDB и Qdrant, при необходимости индексирует данные.
 
+Что делает:
+  - MongoDB: создаёт коллекции docs и cases (если нет).
+  - Qdrant: узнаёт размерность вектора через GigaChat, создаёт коллекцию (если нет).
+  - Если в MongoDB есть данные — индексирует их в Qdrant.
+
+Для Qdrant с API ключом задай в .env: QDRANT_API_KEY=...
+
 Запуск из корня проекта:
     python scripts/setup_rag.py
 
-Нужен .env с: MONGO_URI, QDRANT_URL, GIGACHAT_CLIENT_ID + GIGACHAT_CLIENT_SECRET (или GIGACHAT_AUTH_KEY),
-а также MATTERMOST_URL, MATTERMOST_TOKEN, MATTERMOST_BOT_USER_ID (для load_config; можно заглушки).
+Нужен .env с: MONGO_URI, QDRANT_URL, GIGACHAT_* (и MATTERMOST_* для load_config; можно заглушки).
 
 Опции:
-    --only-create   только создать коллекции, не индексировать из MongoDB
+    --only-create   только создать коллекции (MongoDB + Qdrant), не индексировать
 """
 from __future__ import annotations
 
@@ -64,7 +70,10 @@ def main() -> None:
 
     # ─── Qdrant: размерность вектора и коллекция ──────────────────────
     print("\n[Qdrant] Подключение...")
-    qdrant = QdrantClient(url=cfg.qdrant_url)
+    qdrant_kwargs: dict = {"url": cfg.qdrant_url}
+    if cfg.qdrant_api_key:
+        qdrant_kwargs["api_key"] = cfg.qdrant_api_key
+    qdrant = QdrantClient(**qdrant_kwargs)
     collection = cfg.qdrant_collection
 
     giga = GigaChat(cfg)
