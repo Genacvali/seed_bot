@@ -42,14 +42,28 @@ class QdrantStore:
             query_filter = Filter(
                 must=[FieldCondition(key="type", match=MatchValue(value=type_filter))]
             )
-        results = self._client.search(
-            collection_name=self._collection,
-            query_vector=vector,
-            limit=lim,
-            query_filter=query_filter,
-        )
+
+        # qdrant-client >= 1.7.3: search() удалён, используем query_points()
+        try:
+            response = self._client.query_points(
+                collection_name=self._collection,
+                query=vector,
+                limit=lim,
+                query_filter=query_filter,
+                with_payload=True,
+            )
+            points = response.points
+        except AttributeError:
+            # Fallback для старых версий клиента
+            points = self._client.search(  # type: ignore[attr-defined]
+                collection_name=self._collection,
+                query_vector=vector,
+                limit=lim,
+                query_filter=query_filter,
+            )
+
         payloads = []
-        for r in results:
+        for r in points:
             payload = dict(r.payload or {})
             payload["_score"] = r.score
             payloads.append(payload)

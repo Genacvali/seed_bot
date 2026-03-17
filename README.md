@@ -10,13 +10,13 @@ Mattermost/чат → Python bot → GigaChat Embeddings → Qdrant search → M
 
 ## Быстрый старт
 
-1. Установка зависимостей:
+1. Установка зависимостей в `/data/py_libs`:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
+bash scripts/install_deps.sh
 ```
+
+По умолчанию ставит в `/data/py_libs`. Другой каталог: `bash scripts/install_deps.sh /путь/к/папке`.
 
 2. Настройка `.env` (см. `.env.example`):
 
@@ -33,10 +33,22 @@ python scripts/setup_rag.py
 
 Скрипт создаёт коллекции `docs` и `cases` в MongoDB, коллекцию в Qdrant с нужной размерностью вектора и при наличии данных в MongoDB индексирует их в Qdrant. Подробнее: [docs/SETUP_QUICK.md](docs/SETUP_QUICK.md).
 
-4. Запуск бота:
+4. Запуск бота (с библиотеками из `/data/py_libs`):
 
 ```bash
-python -m bot
+PYTHONPATH=/data/py_libs python3 -m bot
+```
+
+Или через скрипт (подставляет PYTHONPATH сам):
+
+```bash
+bash run.sh
+```
+
+Скрипт настройки RAG с тем же PYTHONPATH:
+
+```bash
+PYTHONPATH=/data/py_libs python3 scripts/setup_rag.py
 ```
 
 ## Схемы данных
