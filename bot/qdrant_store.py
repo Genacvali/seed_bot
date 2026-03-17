@@ -4,6 +4,7 @@ Payload точек: type ("doc" | "case"), doc_id / case_id (str, MongoDB _id).
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 from qdrant_client import QdrantClient
@@ -17,6 +18,9 @@ class QdrantStore:
         kwargs: dict = {"url": cfg.qdrant_url}
         if cfg.qdrant_api_key:
             kwargs["api_key"] = cfg.qdrant_api_key
+            # Не ругаться, если API key с http (например, туннель или внутренний адрес)
+            if cfg.qdrant_url.strip().lower().startswith("http://"):
+                warnings.filterwarnings("ignore", message=".*insecure connection.*", category=UserWarning)
         self._client = QdrantClient(**kwargs)
         self._collection = cfg.qdrant_collection
         self._limit = cfg.qdrant_limit

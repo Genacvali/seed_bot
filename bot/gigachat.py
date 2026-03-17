@@ -33,6 +33,9 @@ class GigaChat:
         self._cfg = cfg
         self._session = requests.Session()
         self._session.verify = cfg.gigachat_verify_tls
+        if not cfg.gigachat_verify_tls:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._token: _Token | None = None
 
     def _get_token(self) -> str:
@@ -58,6 +61,11 @@ class GigaChat:
             },
             timeout=30,
         )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"GigaChat OAuth {r.status_code}: {r.text[:500]}. "
+                "Проверь GIGACHAT_CLIENT_ID, GIGACHAT_CLIENT_SECRET, GIGACHAT_SCOPE и GIGACHAT_VERIFY_TLS."
+            )
         r.raise_for_status()
         data = r.json()
         access_token = data.get("access_token")
