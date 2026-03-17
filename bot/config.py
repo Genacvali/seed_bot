@@ -56,6 +56,10 @@ class Config:
     mongo_uri: str
     mongo_db: str
 
+    # Эмбеддинги: локальные (sentence-transformers) или GigaChat
+    use_local_embeddings: bool
+    local_embeddings_model: str
+
     # Qdrant (векторный поиск)
     qdrant_url: str
     qdrant_api_key: str | None
@@ -85,6 +89,12 @@ def load_config() -> Config:
 
     mongo_uri = _req("MONGO_URI")
     mongo_db = os.getenv("MONGO_DB", "seed_bot")
+
+    use_local_embeddings = _bool("USE_LOCAL_EMBEDDINGS", True)
+    local_embeddings_model = os.getenv(
+        "LOCAL_EMBEDDINGS_MODEL",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    )
 
     qdrant_url = _req("QDRANT_URL").rstrip("/")
     qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
@@ -116,6 +126,8 @@ def load_config() -> Config:
         gigachat_embeddings_model=gigachat_embeddings_model,
         mongo_uri=mongo_uri,
         mongo_db=mongo_db,
+        use_local_embeddings=use_local_embeddings,
+        local_embeddings_model=local_embeddings_model,
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_api_key,
         qdrant_collection=qdrant_collection,

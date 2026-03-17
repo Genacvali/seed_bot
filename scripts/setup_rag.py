@@ -34,8 +34,9 @@ from pymongo import MongoClient, ASCENDING
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 
-# конфиг и GigaChat из бота
+# конфиг и эмбеддинги из бота
 from bot.config import load_config
+from bot.local_embeddings import LocalEmbeddings
 from bot.gigachat import GigaChat
 
 
@@ -76,14 +77,18 @@ def main() -> None:
     qdrant = QdrantClient(**qdrant_kwargs)
     collection = cfg.qdrant_collection
 
-    giga = GigaChat(cfg)
-    # Узнаём размерность эмбеддингов одним запросом
-    test_vectors = giga.embed(["test"])
-    if not test_vectors or not test_vectors[0]:
-        print("  Ошибка: не удалось получить эмбеддинг (проверь GIGACHAT_* в .env)")
-        sys.exit(1)
-    vector_size = len(test_vectors[0])
-    print(f"  Размерность вектора GigaChat: {vector_size}")
+    if cfg.use_local_embeddings:
+        embedder = LocalEmbeddings(cfg)
+        vector_size = embedder.dimension()
+        print(f"  Размерность вектора (локальная модель): {vector_size}")
+    else:
+        embedder = GigaChat(cfg)
+        test_vectors = embedder.embed(["test"])
+        if not test_vectors or not test_vectors[0]:
+            print("  Ошибка: не удалось получить эмбеддинг (проверь GIGACHAT_* в .env)")
+            sys.exit(1)
+        vector_size = len(test_vectors[0])
+        print(f"  Размерность вектора GigaChat: {vector_size}")
 
     if not qdrant.collection_exists(collection):
         qdrant.create_collection(
@@ -127,7 +132,7 @@ def main() -> None:
         return
 
     print(f"\n[Индексация] Эмбеддинг {len(texts_for_embed)} фрагментов...")
-    vectors = giga.embed(texts_for_embed)
+    vectors = embedder.embed(texts_for_embed)
     if len(vectors) != len(meta_batch):
         print(f"  Ошибка: получено {len(vectors)} векторов, ожидалось {len(meta_batch)}")
         sys.exit(1)

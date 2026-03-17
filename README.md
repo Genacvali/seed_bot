@@ -60,6 +60,10 @@ python -m bot
 | QDRANT_URL | URL Qdrant (например http://localhost:6333) |
 | QDRANT_COLLECTION | Имя коллекции (по умолчанию knowledge) |
 | QDRANT_LIMIT | Сколько документов подтягивать (по умолчанию 5) |
+| USE_LOCAL_EMBEDDINGS | true = sentence-transformers локально, false = GigaChat Embeddings API |
+| LOCAL_EMBEDDINGS_MODEL | Модель для эмбеддингов (по умолчанию paraphrase-multilingual-MiniLM-L12-v2, 384 dim) |
+
+**Важно:** если переключаешься с GigaChat Embeddings на локальные (или меняешь модель), заново создай коллекцию в Qdrant и переиндексируй: удали коллекцию в Qdrant и запусти `python scripts/setup_rag.py`.
 
 ## Использование
 

@@ -1,12 +1,13 @@
 """
-RAG pipeline: запрос -> GigaChat Embeddings -> Qdrant -> MongoDB docs/cases -> GigaChat answer.
+RAG pipeline: запрос -> (локальные или GigaChat) эмбеддинги -> Qdrant -> MongoDB docs/cases -> GigaChat answer.
 """
 from __future__ import annotations
 
+from .config import Config
 from .gigachat import GigaChat
+from .local_embeddings import LocalEmbeddings
 from .mongo_store import MongoStore
 from .qdrant_store import QdrantStore
-from .config import Config
 
 
 def _format_context(docs: list, cases: list) -> str:
@@ -23,15 +24,23 @@ def _format_context(docs: list, cases: list) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+def _get_embedder(cfg: Config):
+    """Возвращает объект с методом embed(texts) -> list[list[float]]."""
+    if cfg.use_local_embeddings:
+        return LocalEmbeddings(cfg)
+    return GigaChat(cfg)
+
+
 def run_rag(cfg: Config, query: str) -> str:
     """
     Один проход RAG: эмбеддинг запроса -> поиск в Qdrant -> загрузка docs/cases из MongoDB -> ответ GigaChat.
     """
+    embedder = _get_embedder(cfg)
     gigachat = GigaChat(cfg)
     qdrant = QdrantStore(cfg)
     mongo = MongoStore(cfg)
 
-    vectors = gigachat.embed([query])
+    vectors = embedder.embed([query])
     if not vectors or not vectors[0]:
         return "Не удалось получить эмбеддинг запроса."
 
