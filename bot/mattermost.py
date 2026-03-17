@@ -169,7 +169,10 @@ class MattermostClient:
         *,
         channel_id: str | None,
         stop_event: threading.Event,
+        current_ws_ref: list | None = None,
     ) -> None:
+        """current_ws_ref: optional list to hold the active WebSocketApp; if set, caller may
+        call .close() on it (e.g. from a signal handler) to make run_forever() return."""
         delay = 2
         seq = [1]
 
@@ -198,7 +201,14 @@ class MattermostClient:
                     on_error=on_error,
                     on_close=on_close,
                 )
-                ws.run_forever(ping_interval=20, ping_timeout=10, sslopt=self._sslopt())
+                if current_ws_ref is not None:
+                    current_ws_ref.clear()
+                    current_ws_ref.append(ws)
+                try:
+                    ws.run_forever(ping_interval=20, ping_timeout=10, sslopt=self._sslopt())
+                finally:
+                    if current_ws_ref is not None:
+                        current_ws_ref.clear()
                 delay = 2
             except Exception as e:
                 print(f"[mattermost] ws exception: {e}", flush=True)

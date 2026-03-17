@@ -189,9 +189,15 @@ def main() -> None:
 
     # ── Stop signal ───────────────────────────────────────────────────
     stop = threading.Event()
+    current_ws_ref: list = []  # Mattermost WebSocket; closing it makes listen_posts exit
 
     def _handle_stop(_sig: int, _frame: object) -> None:
         stop.set()
+        if current_ws_ref:
+            try:
+                current_ws_ref[0].close()
+            except Exception:
+                pass
 
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -665,7 +671,12 @@ def main() -> None:
         f"webhook={':{cfg.webhook_port}' if cfg.webhook_port else 'off'}",
         flush=True,
     )
-    mm.listen_posts(on_post, channel_id=target_channel_id, stop_event=stop)
+    mm.listen_posts(
+        on_post,
+        channel_id=target_channel_id,
+        stop_event=stop,
+        current_ws_ref=current_ws_ref,
+    )
 
 
 if __name__ == "__main__":
