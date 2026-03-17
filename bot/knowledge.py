@@ -260,10 +260,13 @@ class KnowledgeManager:
                 pass
 
     def build_context_prompt(self, text: str) -> str:
-        """Инжектирует релевантные факты + глоссарий в контекст LLM (feature 9)."""
+        """
+        RAG: извлекает релевантные фрагменты из БД и формирует контекст для ответа.
+        Модель должна отвечать ТОЛЬКО на основе этого контекста.
+        """
         parts: list[str] = []
 
-        # Факты о серверах/людях
+        # 1. Факты из базы знаний (full-text)
         facts = self._find_relevant_facts(text)
         if facts:
             lines = ["### Факты из базы знаний:"]
@@ -271,7 +274,24 @@ class KnowledgeManager:
                 lines.append(f"- [{f.get('fact_type', '?')}] {f.get('summary', '')}")
             parts.append("\n".join(lines))
 
-        # Глоссарий (feature 4)
+        # 2. Runbooks — инструкции (full-text)
+        if self._storage:
+            try:
+                runbooks = self._storage.search_runbooks(text, limit=5)
+                if runbooks:
+                    rb_lines = ["### Runbooks (инструкции):"]
+                    for r in runbooks:
+                        title = r.get("title", "—")
+                        content = (r.get("content") or "")[:800].strip()
+                        if content:
+                            rb_lines.append(f"**{title}**\n{content}")
+                        else:
+                            rb_lines.append(f"- **{title}** (без текста)")
+                    parts.append("\n\n".join(rb_lines))
+            except Exception as e:
+                print(f"[knowledge] search_runbooks error: {e}", flush=True)
+
+        # 3. Глоссарий (feature 4)
         if self._storage:
             try:
                 gloss = self._storage.build_glossary_context()
@@ -285,7 +305,17 @@ class KnowledgeManager:
                 lines.append(f"- `{t['term']}` = {t['expansion']}")
             parts.append("\n".join(lines))
 
-        return "\n\n".join(parts)
+        if not parts:
+            return ""
+
+        # RAG-обёртка: явно говорим модели использовать только этот контекст
+        header = (
+            "## Контекст для ответа (RAG)\n"
+            "Ниже — извлечённые из базы знания. Отвечай ТОЛЬКО на основе этого контекста. "
+            "Если ответа нет в контексте — честно скажи «В контексте этого нет» или «Не нашёл в базе знаний». "
+            "Не выдумывай факты и ссылки.\n\n"
+        )
+        return header + "\n\n".join(parts)
 
     def build_people_context(self, text: str) -> str:
         """Ищет упомянутых людей в базе и возвращает контекст."""

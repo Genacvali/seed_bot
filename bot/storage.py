@@ -323,6 +323,30 @@ class Storage:
         )
 
     # ------------------------------------------------------------------
+    # Runbooks — RAG: полнотекстовый поиск по инструкциям
+    # ------------------------------------------------------------------
+
+    def search_runbooks(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Full-text поиск по runbooks (title + content). Для RAG."""
+        if not query or not query.strip():
+            return []
+        try:
+            cursor = self._db.runbooks.find(
+                {"$text": {"$search": query.strip()}},
+                {
+                    "score": {"$meta": "textScore"},
+                    "title": 1,
+                    "content": 1,
+                    "tags": 1,
+                    "_id": 0,
+                },
+            ).sort([("score", {"$meta": "textScore"})]).limit(limit)
+            return list(cursor)
+        except Exception as e:
+            print(f"[storage] search_runbooks error: {e}", flush=True)
+            return []
+
+    # ------------------------------------------------------------------
     # On-call schedule
     # ------------------------------------------------------------------
 

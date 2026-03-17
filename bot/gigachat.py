@@ -137,6 +137,12 @@ PostgreSQL, MySQL, MongoDB, Redis, Kubernetes, Docker, CI/CD, \
 Ansible, Terraform, Linux, мониторинг (Prometheus/Grafana), бэкапы, репликация, \
 производительность баз данных, инфраструктура как код.
 
+## RAG — ответ только по контексту
+Когда в системном сообщении есть блок "## Контекст для ответа (RAG)" с фактами, runbooks и словарём:
+- Отвечай СТРОГО на основе этого контекста. Не придумывай то, чего там нет.
+- Если ответа на вопрос в контексте нет — честно скажи: «В контексте этого нет», «Не нашёл в базе знаний» или предложи скинуть ссылку/добавить факт.
+- Не выдавай общие знания за факты из базы. Цитируй только то, что реально приведено в контексте.
+
 ## Работа с людьми
 - Блок "### Люди из базы знаний:" в контексте — используй для ответов про коллег.
 - Если про человека спросили, но в базе нет — честно скажи что не знаешь, попроси рассказать.
@@ -452,3 +458,30 @@ class GigaChatClient:
 
         raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
         return _parse_json_safe(raw)
+
+    def get_embeddings(self, texts: list[str], model: str = "Embeddings") -> list[list[float]]:
+        """
+        Эмбеддинги для RAG (векторный поиск). GigaChat API /embeddings.
+        Возвращает список векторов; при ошибке — пустой список.
+        """
+        if not texts:
+            return []
+        EMBEDDINGS_URL = "https://gigachat.devices.sberbank.ru/api/v1/embeddings"
+        body: dict[str, Any] = {"model": model, "input": [t[:8000] for t in texts]}
+        headers = {
+            "Authorization": "",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            headers["Authorization"] = f"Bearer {self._get_token()}"
+            resp = self._session.post(EMBEDDINGS_URL, headers=headers, json=body, timeout=30)
+            if resp.status_code >= 400:
+                print(f"[gigachat] embeddings failed: {resp.status_code} {resp.text[:200]}", flush=True)
+                return []
+            data = resp.json()
+            out = data.get("data") or []
+            return [item.get("embedding", []) for item in out if isinstance(item.get("embedding"), list)]
+        except Exception as e:
+            print(f"[gigachat] get_embeddings error: {e}", flush=True)
+            return []
