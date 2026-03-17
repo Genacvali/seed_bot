@@ -42,13 +42,18 @@ class GigaChat:
     def _get_token(self) -> str:
         if self._token and time.monotonic() < self._token.expires_at - 60:
             return self._token.value
+
+        # GIGACHAT_AUTH_KEY — готовый base64(client_id:client_secret) из личного кабинета
+        # GIGACHAT_CLIENT_ID + GIGACHAT_CLIENT_SECRET — кодируем сами
         if self._cfg.gigachat_auth_key:
-            self._token = _Token(value=self._cfg.gigachat_auth_key, expires_at=time.monotonic() + 3600)
-            return self._token.value
-        assert self._cfg.gigachat_client_id and self._cfg.gigachat_client_secret
-        credentials = base64.b64encode(
-            f"{self._cfg.gigachat_client_id}:{self._cfg.gigachat_client_secret}".encode()
-        ).decode()
+            credentials = self._cfg.gigachat_auth_key
+        elif self._cfg.gigachat_client_id and self._cfg.gigachat_client_secret:
+            credentials = base64.b64encode(
+                f"{self._cfg.gigachat_client_id}:{self._cfg.gigachat_client_secret}".encode()
+            ).decode()
+        else:
+            raise RuntimeError("GigaChat: задай GIGACHAT_AUTH_KEY или GIGACHAT_CLIENT_ID+GIGACHAT_CLIENT_SECRET")
+
         r = self._session.post(
             OAUTH_URL,
             headers={
@@ -66,9 +71,8 @@ class GigaChat:
         if r.status_code >= 400:
             raise RuntimeError(
                 f"GigaChat OAuth {r.status_code}: {r.text[:500]}. "
-                "Проверь GIGACHAT_CLIENT_ID, GIGACHAT_CLIENT_SECRET, GIGACHAT_SCOPE и GIGACHAT_VERIFY_TLS."
+                "Проверь GIGACHAT_AUTH_KEY (или CLIENT_ID/SECRET), GIGACHAT_SCOPE, GIGACHAT_VERIFY_TLS."
             )
-        r.raise_for_status()
         data = r.json()
         access_token = data.get("access_token")
         expires_in = float(data.get("expires_in", 3600))
