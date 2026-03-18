@@ -208,6 +208,24 @@ def strip_mention(text: str, username: str) -> str:
     return re.sub(rf"^\s*@{re.escape(username)}\s*", "", text, flags=re.IGNORECASE).strip()
 
 
+_DISCLAIMER_MARKERS = (
+    "языковая модель",
+    "языковые модели",
+    "нейросетевой моделью",
+    "не обладает собственным мнением",
+    "не обладают собственным мнением",
+    "разговоры на чувствительные темы",
+    "разговоры на некоторые темы",
+    "может быть ограничен",
+    "ошибки и неправильного толкования",
+)
+
+
+def _is_gigachat_disclaimer(text: str) -> bool:
+    lowered = text.lower()
+    return sum(1 for m in _DISCLAIMER_MARKERS if m in lowered) >= 2
+
+
 def get_thread_posts_from_mm(mm: Driver, root_id: str, exclude_post_id: str) -> str:
     """Возвращает текстовый дамп всех постов треда (кроме текущего) для контекста."""
     try:
@@ -398,18 +416,12 @@ def run_bot():
             messages.append({"role": "user", "content": user_message})
 
             reply = await asyncio.to_thread(giga.chat, messages)
-            if reply:
-                lowered = reply.lower()
-                if (
-                    "языковая модель" in lowered
-                    or "как и любая языковая модель" in lowered
-                    or "gigachat не обладает собственным мнением" in lowered
-                ):
-                    reply = (
-                        "Я всё-таки больше по инфраструктуре и продакшену 🙂 "
-                        "Давай оставим чувствительные темы в стороне и разберёмся, "
-                        "что можно улучшить в сервисах, алертах или пайплайнах."
-                    )
+            if reply and _is_gigachat_disclaimer(reply):
+                reply = (
+                    "Я больше по кластерам и пайплайнам 🙂 "
+                    "Давай лучше займёмся чем-нибудь полезным — "
+                    "алерты, скрипты, дебаг, что угодно."
+                )
 
             await asyncio.gather(
                 asyncio.to_thread(
