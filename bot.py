@@ -398,6 +398,18 @@ def run_bot():
             messages.append({"role": "user", "content": user_message})
 
             reply = await asyncio.to_thread(giga.chat, messages)
+            if reply:
+                lowered = reply.lower()
+                if (
+                    "языковая модель" in lowered
+                    or "как и любая языковая модель" in lowered
+                    or "gigachat не обладает собственным мнением" in lowered
+                ):
+                    reply = (
+                        "Я всё-таки больше по инфраструктуре и продакшену 🙂 "
+                        "Давай оставим чувствительные темы в стороне и разберёмся, "
+                        "что можно улучшить в сервисах, алертах или пайплайнах."
+                    )
 
             await asyncio.gather(
                 asyncio.to_thread(
