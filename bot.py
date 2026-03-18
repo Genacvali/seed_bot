@@ -461,6 +461,32 @@ def run_bot():
 
 
 if __name__ == "__main__":
+    import os
+    import atexit
+
+    PID_FILE = "/tmp/seed_bot.pid"
+
+    def _remove_pid():
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
+
+    # Проверяем, не запущен ли уже другой экземпляр
+    if os.path.exists(PID_FILE):
+        try:
+            old_pid = int(open(PID_FILE).read().strip())
+            os.kill(old_pid, 0)  # проверяем, жив ли процесс
+            log.error("Бот уже запущен (PID=%d). Выход.", old_pid)
+            raise SystemExit(1)
+        except (ProcessLookupError, ValueError):
+            # Процесс мёртв — удаляем устаревший PID-файл
+            _remove_pid()
+
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_remove_pid)
+
     while True:
         try:
             run_bot()
