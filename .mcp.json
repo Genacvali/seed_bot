@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "quint-code": {
+      "command": "/home/gena1/.local/bin/quint-code",
+      "args": [
+        "serve"
+      ],
+      "cwd": "/home/gena1/seed_bot",
+      "env": {
+        "QUINT_PROJECT_ROOT": "/home/gena1/seed_bot"
+      }
+    }
+  }
+}
