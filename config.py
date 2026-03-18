@@ -22,9 +22,9 @@ GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2")
 GIGACHAT_VERIFY_TLS = os.getenv("GIGACHAT_VERIFY_TLS", "false").lower() == "true"
 GIGACHAT_RATE_LIMIT = int(os.getenv("GIGACHAT_RATE_LIMIT", "20"))
 
-# MongoDB
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB = os.getenv("MONGODB_DB", "seed_bot")
+# MongoDB (принимаем оба варианта: MONGO_URI и MONGODB_URI)
+MONGODB_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB = os.getenv("MONGO_DB") or os.getenv("MONGODB_DB", "seed_bot")
 MONGODB_HISTORY_TTL_DAYS = int(os.getenv("MONGODB_HISTORY_TTL_DAYS", "30"))
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "50"))
 
