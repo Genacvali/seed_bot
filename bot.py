@@ -314,6 +314,7 @@ def run_bot():
             log.warning("Не удалось найти @%s: %s — авто-анализ алертов не работает", MONITORING_BOT_USERNAME, e)
 
     async def post_alert_reaction(channel_id: str, root_id: str, current_post_id: str,
+                                  trigger_message: str,
                                   claim_key: str, system_prompt: str, label: str):
         claimed = await asyncio.to_thread(try_claim_post, processed_coll, claim_key)
         if not claimed:
@@ -323,6 +324,13 @@ def run_bot():
         thread_context = await asyncio.to_thread(
             get_thread_posts_from_mm, mm, root_id, current_post_id
         )
+        # Всегда включаем текст самого триггерного поста — он содержит суть алерта
+        if trigger_message:
+            if thread_context:
+                thread_context = trigger_message + "\n---\n" + thread_context.removeprefix("Контекст треда:\n")
+                thread_context = "Контекст треда:\n" + thread_context
+            else:
+                thread_context = "Контекст треда:\n" + trigger_message
         if not thread_context:
             log.warning("%s: пустой тред для root_id=%s", label, root_id)
             return
@@ -375,6 +383,7 @@ def run_bot():
                 log.info("Алерт закрыт, формирую саммари (root=%s)", root_id)
                 asyncio.ensure_future(post_alert_reaction(
                     channel_id, root_id, post_id,
+                    trigger_message=message,
                     claim_key=f"alert_close_{root_id}",
                     system_prompt=ALERT_CLOSE_PROMPT,
                     label="Итоговое саммари",
@@ -384,6 +393,7 @@ def run_bot():
                          root_id, bool(post.get("root_id")))
                 asyncio.ensure_future(post_alert_reaction(
                     channel_id, root_id, post_id,
+                    trigger_message=message,
                     claim_key=f"alert_open_{root_id}",
                     system_prompt=ALERT_OPEN_PROMPT,
                     label="Анализ алерта",
