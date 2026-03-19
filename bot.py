@@ -298,13 +298,20 @@ def run_bot():
     giga = GigaChatClient()
 
     monitoring_bot_user_id = None
-    if ALERT_AUTO_SUMMARY and MONITORING_BOT_USERNAME:
+    if not ALERT_AUTO_SUMMARY:
+        log.info("Авто-анализ алертов отключён (ALERT_AUTO_SUMMARY=false)")
+    elif not MONITORING_BOT_USERNAME:
+        log.warning(
+            "MONITORING_BOT_USERNAME не задан в .env — авто-анализ алертов не работает. "
+            "Добавь: MONITORING_BOT_USERNAME=<username мониторинг-бота>"
+        )
+    else:
         try:
             u = mm.users.get_user_by_username(MONITORING_BOT_USERNAME)
             monitoring_bot_user_id = u.get("id")
-            log.info("Мониторинг-бот: @%s (%s)", MONITORING_BOT_USERNAME, monitoring_bot_user_id)
+            log.info("Мониторинг-бот: @%s (id=%s) — авто-анализ активен", MONITORING_BOT_USERNAME, monitoring_bot_user_id)
         except Exception as e:
-            log.warning("Не удалось найти @%s: %s", MONITORING_BOT_USERNAME, e)
+            log.warning("Не удалось найти @%s: %s — авто-анализ алертов не работает", MONITORING_BOT_USERNAME, e)
 
     async def post_alert_reaction(channel_id: str, root_id: str, current_post_id: str,
                                   claim_key: str, system_prompt: str, label: str):
@@ -362,23 +369,27 @@ def run_bot():
 
         # Авто-реакция на алерты мониторинг-бота
         if monitoring_bot_user_id and user_id == monitoring_bot_user_id:
-            if post.get("root_id"):  # только посты внутри треда, не root
-                if ALERT_CLOSED_RE.search(message):
-                    asyncio.ensure_future(post_alert_reaction(
-                        channel_id, root_id, post_id,
-                        claim_key=f"alert_close_{root_id}",
-                        system_prompt=ALERT_CLOSE_PROMPT,
-                        label="Итоговое саммари",
-                    ))
-                elif message:
-                    # Детальный пост с текстом (Z-номер, описание) — анализ при открытии
-                    # Пустые посты (Grafana-картинки) пропускаем
-                    asyncio.ensure_future(post_alert_reaction(
-                        channel_id, root_id, post_id,
-                        claim_key=f"alert_open_{root_id}",
-                        system_prompt=ALERT_OPEN_PROMPT,
-                        label="Анализ алерта",
-                    ))
+            log.debug("Пост от мониторинг-бота: post_id=%s root_id=%s msg=%r",
+                      post_id, post.get("root_id"), message[:80])
+            if ALERT_CLOSED_RE.search(message):
+                log.info("Алерт закрыт, формирую саммари (root=%s)", root_id)
+                asyncio.ensure_future(post_alert_reaction(
+                    channel_id, root_id, post_id,
+                    claim_key=f"alert_close_{root_id}",
+                    system_prompt=ALERT_CLOSE_PROMPT,
+                    label="Итоговое саммари",
+                ))
+            elif message:
+                log.info("Алерт открыт/обновлён, запускаю анализ (root=%s, thread=%s)",
+                         root_id, bool(post.get("root_id")))
+                asyncio.ensure_future(post_alert_reaction(
+                    channel_id, root_id, post_id,
+                    claim_key=f"alert_open_{root_id}",
+                    system_prompt=ALERT_OPEN_PROMPT,
+                    label="Анализ алерта",
+                ))
+            else:
+                log.debug("Пост мониторинг-бота без текста (картинка?), пропускаю")
             return
 
         # Обычный диалог
